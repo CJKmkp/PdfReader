@@ -324,6 +324,20 @@ namespace PdfReader
 
             _config.LastPageIndex = target;
 
+            // 同步宿主翻页条的页码：滚轮/弹窗按钮翻页不经过宿主翻页条的回调，
+            // 若不主动调用 UpdatePageAsync，翻页条会一直显示旧页码。
+            if (_presentationActive)
+            {
+                try
+                {
+                    _ = _presentation.UpdatePageAsync(target + 1);
+                }
+                catch (Exception ex)
+                {
+                    _logError?.Invoke("同步放映模式页码失败", ex);
+                }
+            }
+
             try { PageChanged?.Invoke(target); }
             catch (Exception ex) { _logError?.Invoke("PDF 页码变化通知失败", ex); }
         }
