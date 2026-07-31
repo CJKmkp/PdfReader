@@ -3,188 +3,192 @@ using System.Collections.Generic;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Media;
-using System.Windows.Media.Animation;
 using Ink_Canvas.Plugins;
 
 namespace PdfReader.Views
 {
     /// <summary>
-    /// 注入到宿主 InkCanvas 下方的 PDF 背景视图。
-    /// 支持单页（一张图铺满）与双页（左右并排）两种展示。
-    /// 只负责显示页面位图，不含任何交互与墨迹：宿主注入时会把它设为 IsHitTestVisible = false，
-    /// 书写事件全部落到宿主画布上。页面坐标系即本元素的 ActualWidth/ActualHeight（DIP），
-    /// 宿主按此换算墨迹坐标。
+    /// 注入到宿主 InkCanvas 下方的 PDF 背景视图：连续滚动长条。
+    /// 所有页垂直排列在 <see cref="Strip"/> 里，页间留空白带，滚动通过 RenderTransform.TranslateY 实现。
+    /// 只负责显示页面位图与计算页矩形，不含任何交互与墨迹：
+    /// 宿主注入时会把它设为 IsHitTestVisible = false，书写事件全部落到宿主画布上。
     /// </summary>
     public partial class PdfBackgroundView : UserControl
     {
-        /// <summary>翻页滑动过渡时长。</summary>
-        private static readonly Duration SlideDuration = new Duration(TimeSpan.FromMilliseconds(180));
+        /// <summary>页与页之间的空白带高度（DIP）。</summary>
+        private const double PageGutter = 32;
 
-        /// <summary>双页模式左右页之间的间隙（DIP）。</summary>
-        private const double DoublePageGutter = 12;
+        /// <summary>当前可见页的 Image 列表（按页序），与 <see cref="_pageImages"/> 一一对应。</summary>
+        private readonly List<Image> _pageImages = new List<Image>();
+
+        /// <summary>每页渲染用的源（长条坐标布局）。</summary>
+        private readonly List<ImageSource> _pageSources = new List<ImageSource>();
+
+        /// <summary>当前滚动偏移（DIP，长条内容向上滚为正）。</summary>
+        private double _scrollOffset;
+
+        /// <summary>长条当前实际高度（布局后）。</summary>
+        private double _stripHeight;
 
         public PdfBackgroundView()
         {
             InitializeComponent();
         }
 
-        /// <summary>当前是否双页模式。</summary>
-        public bool IsDoublePage { get; private set; }
+        /// <summary>总页数。</summary>
+        public int PageCount => _pageImages.Count;
 
-        /// <summary>设置单页显示。</summary>
-        public void SetSinglePage(ImageSource image)
+        /// <summary>当前滚动偏移（DIP）。</summary>
+        public double ScrollOffset => _scrollOffset;
+
+        /// <summary>长条总高度（含页间空白带）。</summary>
+        public double StripHeight => _stripHeight;
+
+        /// <summary>
+        /// 重置为指定页数的长条。保留已有页的位图（复用缓存），新增页用 null 占位，
+        /// 由会话层调用 <see cref="SetPageSource"/> 填充。
+        /// </summary>
+        public void ResetPages(int pageCount)
         {
-            IsDoublePage = false;
-            RightColumn.Width = new GridLength(0);
-            RightImage.Visibility = Visibility.Collapsed;
-            LeftImage.Source = image;
+            Strip.Children.Clear();
+            _pageImages.Clear();
+            _pageSources.Clear();
+
+            double top = 0;
+            for (int i = 0; i < pageCount; i++)
+            {
+                var img = new Image
+                {
+                    Stretch = Stretch.Uniform,
+                    HorizontalAlignment = HorizontalAlignment.Left,
+                    VerticalAlignment = VerticalAlignment.Top,
+                    Width = ActualWidth,
+                    SnapsToDevicePixels = true
+                };
+                RenderOptions.SetBitmapScalingMode(img, BitmapScalingMode.HighQuality);
+                Canvas.SetTop(img, top);
+                Canvas.SetLeft(img, 0);
+                Strip.Children.Add(img);
+                _pageImages.Add(img);
+                _pageSources.Add(null);
+                top += img.Width * (img.Source?.Height / (img.Source?.Width ?? 1) ?? 1.414) + PageGutter;
+            }
+            _stripHeight = top - PageGutter;
+            RecomputePageLayout();
         }
 
-        /// <summary>设置双页显示；<paramref name="right"/> 为 null 时右页留空。</summary>
-        public void SetDoublePage(ImageSource left, ImageSource right)
+        /// <summary>设置指定页的位图源。</summary>
+        public void SetPageSource(int pageIndex, ImageSource source)
         {
-            IsDoublePage = true;
-            RightColumn.Width = new GridLength(1, GridUnitType.Star);
-            RightImage.Visibility = Visibility.Visible;
-            LeftImage.Source = left;
-            RightImage.Source = right;
+            if (pageIndex < 0 || pageIndex >= _pageImages.Count) return;
+            _pageImages[pageIndex].Source = source;
+            _pageSources[pageIndex] = source;
+            RecomputePageLayout();
+        }
+
+        /// <summary>设置滚动偏移并平移长条。</summary>
+        public void SetScrollOffset(double offset)
+        {
+            _scrollOffset = offset;
+            StripTransform.Y = -_scrollOffset;
+        }
+
+        /// <summary>长条高度变化时重新布局（页面 Uniform 在画布内居中）。</summary>
+        private void RecomputePageLayout()
+        {
+            double viewW = ActualWidth;
+            if (viewW <= 0) return;
+
+            double top = 0;
+            for (int i = 0; i < _pageImages.Count; i++)
+            {
+                var img = _pageImages[i];
+                var source = _pageSources[i];
+                double imgW = source?.Width ?? 612;
+                double imgH = source?.Height ?? 792;
+                double scale = Math.Min(viewW / imgW, imgH > 0 ? 1.0 : 1.0);
+                double w = imgW * scale;
+                double h = imgH * scale;
+                img.Width = w;
+                Canvas.SetLeft(img, (viewW - w) / 2);
+                Canvas.SetTop(img, top);
+                top += h + PageGutter;
+            }
+            _stripHeight = top - PageGutter;
+            Strip.Height = _stripHeight;
         }
 
         /// <summary>
-        /// 计算当前可见页的矩形列表（背景元素坐标系，DIP）。
-        /// 返回 (pageIndex, rect)：单页时 1 项；双页时左、右 2 项。
-        /// 供宿主按矩形切分墨迹。
+        /// 计算视口 <c>[offset, offset + viewportHeight]</c> 内可见的页及各自在长条中的矩形。
+        /// 返回 (pageIndex, 页在长条坐标的矩形)。
         /// </summary>
-        public IReadOnlyList<PluginVisiblePage> GetVisiblePageRects(int leftPageIndex)
+        public IReadOnlyList<PluginVisiblePage> GetVisiblePageRects(double viewportHeight)
         {
-            var list = new List<PluginVisiblePage>(2);
-
+            var list = new List<PluginVisiblePage>();
             double viewW = ActualWidth;
-            double viewH = ActualHeight;
-            if (viewW <= 0 || viewH <= 0) return list;
+            if (viewW <= 0 || viewportHeight <= 0) return list;
 
-            if (IsDoublePage)
+            double top = 0;
+            for (int i = 0; i < _pageImages.Count; i++)
             {
-                double half = viewW / 2;
-                var leftRect = ComputeUniformRect(LeftImage.Source,
-                    new Rect(0, 0, half - DoublePageGutter / 2, viewH));
-                if (!leftRect.IsEmpty)
+                var img = _pageImages[i];
+                double h = img.ActualHeight > 0 ? img.ActualHeight : img.Height;
+                double w = img.ActualWidth > 0 ? img.ActualWidth : img.Width;
+                double pageTop = top;
+                double pageBottom = pageTop + h;
+
+                // 页是否与视口相交。
+                if (pageBottom > _scrollOffset && pageTop < _scrollOffset + viewportHeight)
                 {
+                    // 页在长条坐标的矩形（含页内空白，导出时按此裁剪墨迹）。
                     list.Add(new PluginVisiblePage
                     {
-                        PageIndex = (uint)leftPageIndex,
-                        ContentRect = leftRect
+                        PageIndex = (uint)i,
+                        ContentRect = new Rect(
+                            (viewW - w) / 2,
+                            pageTop,
+                            w,
+                            h)
                     });
                 }
 
-                var rightRect = ComputeUniformRect(RightImage.Source,
-                    new Rect(half + DoublePageGutter / 2, 0, half - DoublePageGutter / 2, viewH));
-                if (!rightRect.IsEmpty)
-                {
-                    list.Add(new PluginVisiblePage
-                    {
-                        PageIndex = (uint)(leftPageIndex + 1),
-                        ContentRect = rightRect
-                    });
-                }
-            }
-            else
-            {
-                var rect = ComputeUniformRect(LeftImage.Source,
-                    new Rect(0, 0, viewW, viewH));
-                if (!rect.IsEmpty)
-                {
-                    list.Add(new PluginVisiblePage
-                    {
-                        PageIndex = (uint)leftPageIndex,
-                        ContentRect = rect
-                    });
-                }
+                top = pageBottom + PageGutter;
             }
 
             return list;
         }
 
-        /// <summary>计算图片 Uniform 缩放后在视口内占据的矩形。</summary>
-        private static Rect ComputeUniformRect(ImageSource source, Rect viewport)
+        /// <summary>指定页在长条中的矩形（用于导出定位墨迹）。</summary>
+        public Rect? GetPageRect(int pageIndex)
         {
-            if (source == null || viewport.IsEmpty) return Rect.Empty;
-
-            double imgW = source.Width;
-            double imgH = source.Height;
-            if (imgW <= 0 || imgH <= 0 || viewport.Width <= 0 || viewport.Height <= 0) return Rect.Empty;
-
-            double scale = Math.Min(viewport.Width / imgW, viewport.Height / imgH);
-            double w = imgW * scale;
-            double h = imgH * scale;
-            return new Rect(
-                viewport.X + (viewport.Width - w) / 2,
-                viewport.Y + (viewport.Height - h) / 2,
-                w, h);
+            if (pageIndex < 0 || pageIndex >= _pageImages.Count) return null;
+            double viewW = ActualWidth;
+            var img = _pageImages[pageIndex];
+            double w = img.ActualWidth > 0 ? img.ActualWidth : img.Width;
+            double h = img.ActualHeight > 0 ? img.ActualHeight : img.Height;
+            double top = Canvas.GetTop(img);
+            return new Rect((viewW - w) / 2, top, w, h);
         }
 
-        /// <summary>带滑动过渡地设置单页（向后=下滑入，向前=上滑入）。</summary>
-        public void SetSinglePageWithSlide(ImageSource image, bool forward)
+        /// <summary>指定页对应的 Image 元素。</summary>
+        public Image GetPageImage(int pageIndex)
         {
-            if (image == null)
-            {
-                SetSinglePage(null);
-                return;
-            }
-
-            SetSinglePage(image);
-
-            double height = ActualHeight;
-            if (height <= 0) return;
-
-            LeftTransform.BeginAnimation(TranslateTransform.YProperty, null);
-            LeftTransform.Y = forward ? height : -height;
-
-            var slide = new DoubleAnimation
-            {
-                From = LeftTransform.Y,
-                To = 0,
-                Duration = SlideDuration,
-                EasingFunction = new CubicEase { EasingMode = EasingMode.EaseOut },
-                FillBehavior = FillBehavior.Stop
-            };
-            slide.Completed += (_, __) =>
-            {
-                LeftTransform.BeginAnimation(TranslateTransform.YProperty, null);
-                LeftTransform.Y = 0;
-            };
-            LeftTransform.BeginAnimation(TranslateTransform.YProperty, slide);
+            if (pageIndex < 0 || pageIndex >= _pageImages.Count) return null;
+            return _pageImages[pageIndex];
         }
 
-        /// <summary>带滑动过渡地设置双页（整体下滑入 / 上滑入）。</summary>
-        public void SetDoublePageWithSlide(ImageSource left, ImageSource right, bool forward)
+        /// <summary>给定长条内的 Y 坐标，返回该位置所属的页索引。</summary>
+        public int GetPageIndexAtOffset(double y)
         {
-            SetDoublePage(left, right);
-
-            double height = ActualHeight;
-            if (height <= 0) return;
-
-            var target = new TranslateTransform();
-            foreach (var (t, name) in new[] { (LeftTransform, nameof(LeftTransform)), (RightTransform, nameof(RightTransform)) })
+            for (int i = 0; i < _pageImages.Count; i++)
             {
-                t.BeginAnimation(TranslateTransform.YProperty, null);
-                t.Y = forward ? height : -height;
-                var slide = new DoubleAnimation
-                {
-                    From = t.Y,
-                    To = 0,
-                    Duration = SlideDuration,
-                    EasingFunction = new CubicEase { EasingMode = EasingMode.EaseOut },
-                    FillBehavior = FillBehavior.Stop
-                };
-                slide.Completed += (_, __) =>
-                {
-                    t.BeginAnimation(TranslateTransform.YProperty, null);
-                    t.Y = 0;
-                };
-                t.BeginAnimation(TranslateTransform.YProperty, slide);
+                double top = Canvas.GetTop(_pageImages[i]);
+                double h = _pageImages[i].ActualHeight > 0 ? _pageImages[i].ActualHeight : _pageImages[i].Height;
+                if (y >= top && y < top + h) return i;
             }
-            _ = target; // 保留占位，避免误删的变量告警
+            // 超出范围：最后一个可见的页。
+            if (y < 0) return 0;
+            return Math.Max(0, _pageImages.Count - 1);
         }
     }
 }

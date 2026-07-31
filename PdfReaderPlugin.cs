@@ -136,11 +136,6 @@ namespace PdfReader
             get { lock (_gate) return _session?.PageCount ?? 0; }
         }
 
-        internal bool IsDoublePage
-        {
-            get { lock (_gate) return _session?.IsDoublePage == true; }
-        }
-
         internal string StatusText => _statusText;
 
         /// <summary>弹出文件对话框并把选中的 PDF 加载为画布背景。</summary>
@@ -220,8 +215,7 @@ namespace PdfReader
             lock (_gate) session = _session;
             if (session?.IsOpen != true) return;
 
-            // 页码记忆与状态刷新统一由 PageChanged 事件处理。
-            await session.NextPageAsync(CancellationToken.None).ConfigureAwait(false);
+            await session.ScrollToPageTopAsync(session.CurrentPage + 1, CancellationToken.None).ConfigureAwait(false);
         }
 
         internal async Task PreviousPageAsync()
@@ -230,16 +224,7 @@ namespace PdfReader
             lock (_gate) session = _session;
             if (session?.IsOpen != true) return;
 
-            await session.PreviousPageAsync(CancellationToken.None).ConfigureAwait(false);
-        }
-
-        internal async Task SetDoublePageModeAsync(bool enabled)
-        {
-            EmbeddedReaderSession session;
-            lock (_gate) session = _session;
-            if (session?.IsOpen != true) return;
-
-            await session.SetDoublePageModeAsync(enabled, CancellationToken.None).ConfigureAwait(false);
+            await session.ScrollToPageTopAsync(session.CurrentPage - 1, CancellationToken.None).ConfigureAwait(false);
         }
 
         /// <summary>弹出保存对话框并导出「背景 + 墨迹」。</summary>

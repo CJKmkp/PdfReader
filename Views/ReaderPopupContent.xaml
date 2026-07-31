@@ -26,10 +26,6 @@
                             Click="NextButton_Click" />
                 </ikw:SimpleStackPanel>
 
-                <ToggleButton x:Name="DoublePageButton" Padding="10,4" MinWidth="96"
-                              HorizontalAlignment="Center"
-                              Checked="DoublePageButton_Checked" Unchecked="DoublePageButton_Unchecked" />
-
                 <ikw:SimpleStackPanel Orientation="Horizontal" Spacing="6" HorizontalAlignment="Center">
                     <Button x:Name="OpenButton" Padding="10,4" MinWidth="72" Click="OpenButton_Click" />
                     <Button x:Name="ExportButton" Padding="10,4" MinWidth="104" Click="ExportButton_Click" />

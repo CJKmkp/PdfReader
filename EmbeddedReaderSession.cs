@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Threading;
 using System.Threading.Tasks;
 using System.Windows;
+using System.Windows.Controls;
 using System.Windows.Input;
 using System.Windows.Media.Imaging;
 using Ink_Canvas.Plugins;
@@ -11,9 +12,9 @@ using PdfReader.Views;
 namespace PdfReader
 {
     /// <summary>
-    /// 嵌入式 PDF 会话：把 PDF 作为背景层注入宿主画布下方，墨迹由宿主自己的 InkCanvas 承载。
-    /// 翻页时通过 <see cref="ICanvasCompositionService.SetCurrentPageAsync"/> 让宿主按页存取墨迹，
-    /// 导出交给宿主的 <see cref="ICanvasCompositionService.ExportWithInkAsync"/>（PdfSharp 组装）。
+    /// 嵌入式 PDF 会话：把 PDF 作为连续滚动长条注入宿主画布下方，墨迹由宿主自己的 InkCanvas 承载。
+    /// 滚动时背景层平移、宿主同步平移画布墨迹（实时跟随）；滚动停止后按视口内可见页切分/恢复墨迹。
+    /// 导出交给宿主的 <see cref="ICanvasCompositionService.ExportWithInkAsync"/>。
     /// </summary>
     internal sealed class EmbeddedReaderSession : IDisposable
     {
@@ -36,23 +37,14 @@ namespace PdfReader
         private int _currentPage;
         private bool _disposed;
 
-        /// <summary>正在翻页中，用于丢弃同一次滚轮手势里的连发事件。</summary>
-        private int _turning;
-
         /// <summary>已挂上 PreviewMouseWheel 的宿主窗口。</summary>
         private Window _wheelHost;
 
         /// <summary>是否已成功进入宿主放映模式；退出时据此决定是否调用 EndAsync。</summary>
         private bool _presentationActive;
 
-        /// <summary>双页模式：一次显示 (CurrentPage, CurrentPage+1) 两页，翻页按页对（+2）。</summary>
-        public bool IsDoublePage { get; private set; }
-
-        /// <summary>双页模式下可见页数（末页可能只有一页）。</summary>
-        private int VisiblePageCount =>
-            IsDoublePage && _document != null
-                ? Math.Min(2, (int)_document.PageCount - CurrentPage)
-                : 1;
+        /// <summary>滚动停止去抖计时器状态。</summary>
+        private CancellationTokenSource _scrollSettleCts;
 
         public EmbeddedReaderSession(ICanvasCompositionService composition,
             IPresentationSourceService presentation, ReaderConfig config,
@@ -80,12 +72,13 @@ namespace PdfReader
             get { lock (_gate) return _document == null ? 0 : (int)_document.PageCount; }
         }
 
+        /// <summary>当前视口顶部对应的页（0-based），用于页码显示与翻页条。</summary>
         public int CurrentPage
         {
             get { lock (_gate) return _currentPage; }
         }
 
-        /// <summary>打开文档、注入背景层并渲染首页。</summary>
+        /// <summary>打开文档、渲染所有页为长条，并滚动到指定页顶部。</summary>
         public async Task OpenAsync(string path, int initialPage, CancellationToken cancellationToken)
         {
             var session = await PdfDocumentSession.OpenAsync(path, cancellationToken).ConfigureAwait(false);
@@ -102,18 +95,69 @@ namespace PdfReader
 
             EnsureBackgroundLayer();
 
-            // 先告知总页数与当前页，并交出离屏渲染回调（导出非当前页时宿主会回调它）。
             _composition.ConfigurePages((uint)session.PageCount, (uint)_currentPage, RenderPageForExportAsync);
 
-            await RenderCurrentPageAsync(cancellationToken).ConfigureAwait(false);
+            await ResetStripAsync(cancellationToken).ConfigureAwait(false);
+
+            // 滚动到初始页顶部。
+            await ScrollToPageTopAsync(_currentPage, cancellationToken).ConfigureAwait(false);
 
             await BeginPresentationAsync((int)session.PageCount, cancellationToken).ConfigureAwait(false);
         }
 
-        /// <summary>
-        /// 进入宿主放映模式，让宿主的四个翻页条接管翻页。
-        /// 宿主未提供该服务（旧版本）时静默跳过，PDF 仍可用弹窗与滚轮翻页。
-        /// </summary>
+        /// <summary>重建长条：重置所有页占位并逐个渲染。</summary>
+        private async Task ResetStripAsync(CancellationToken cancellationToken)
+        {
+            var view = _backgroundView;
+            if (view == null) return;
+
+            int count = PageCount;
+            if (view.Dispatcher.CheckAccess()) view.ResetPages(count);
+            else view.Dispatcher.Invoke(() => view.ResetPages(count));
+
+            // 视口附近先渲染（前 3 页），其余延迟渲染。
+            int initialWindow = Math.Min(count, 3);
+            for (int i = 0; i < initialWindow; i++)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                var bitmap = await RenderPageAsync(i, cancellationToken).ConfigureAwait(false);
+                ApplyPageSource(i, bitmap);
+            }
+
+            // 其余页后台渲染（不阻塞）。
+            _ = Task.Run(() => RenderRemainingPagesAsync(initialWindow, cancellationToken), cancellationToken);
+        }
+
+        private async Task RenderRemainingPagesAsync(int startIndex, CancellationToken cancellationToken)
+        {
+            try
+            {
+                for (int i = startIndex; i < PageCount; i++)
+                {
+                    cancellationToken.ThrowIfCancellationRequested();
+                    var bitmap = await RenderPageAsync(i, cancellationToken).ConfigureAwait(false);
+                    ApplyPageSource(i, bitmap);
+                }
+            }
+            catch (OperationCanceledException)
+            {
+            }
+            catch (Exception ex)
+            {
+                _logError?.Invoke("渲染 PDF 页失败", ex);
+            }
+        }
+
+        private void ApplyPageSource(int pageIndex, BitmapSource bitmap)
+        {
+            var view = _backgroundView;
+            if (view == null || bitmap == null) return;
+
+            if (view.Dispatcher.CheckAccess()) view.SetPageSource(pageIndex, bitmap);
+            else view.Dispatcher.Invoke(() => view.SetPageSource(pageIndex, bitmap));
+        }
+
+        /// <summary>进入宿主放映模式。</summary>
         private async Task BeginPresentationAsync(int pageCount, CancellationToken cancellationToken)
         {
             if (_presentation == null || pageCount <= 0) return;
@@ -125,22 +169,16 @@ namespace PdfReader
                     Id = PresentationSourceId,
                     Name = Strings.PluginName,
                     PageCount = pageCount,
-                    // 宿主页码是 1-based，内部索引是 0-based。
                     CurrentPage = CurrentPage + 1,
                     NavigateAsync = HandleHostNavigationAsync,
-                    // PDF 没有缩略图跳页 UI，禁用页码点击。
                     AllowPageNumberClick = false
                 };
 
                 await _presentation.BeginAsync(descriptor, cancellationToken).ConfigureAwait(false);
 
-                // BeginAsync 返回 true 才算真正进入；被真实 PPT 放映拒绝时保持未激活。
                 if (_presentation.IsActive)
                 {
                     _presentationActive = true;
-
-                    // 宿主侧强制结束（用户点退出按钮、真实 PPT 开始放映等）时，
-                    // 插件要随之关闭文档并移除背景层，否则会残留放映布局。
                     try { _presentation.Ended += OnPresentationEnded; }
                     catch { }
                 }
@@ -151,7 +189,7 @@ namespace PdfReader
             }
         }
 
-        /// <summary>宿主结束外部演示源时触发，插件随之关闭 PDF（等价于"退出=关闭"）。</summary>
+        /// <summary>宿主结束外部演示源时触发，插件随之关闭 PDF。</summary>
         private void OnPresentationEnded(string sourceId)
         {
             if (sourceId != PresentationSourceId) return;
@@ -159,39 +197,28 @@ namespace PdfReader
             _presentationActive = false;
             try { _presentation.Ended -= OnPresentationEnded; }
             catch { }
-
-            // 宿主已在 UI 线程触发本事件；Close 是同步清理，直接调用。
             Close();
         }
 
-        /// <summary>
-        /// 宿主翻页条触发的翻页。返回新页码（1-based），到边界返回 0 让宿主忽略。
-        /// </summary>
+        /// <summary>宿主翻页条触发的滚动到下一/上一页顶部。</summary>
         private async Task<int> HandleHostNavigationAsync(PresentationNavigation direction,
             CancellationToken cancellationToken)
         {
             if (!IsOpen) return 0;
 
-            // 双页模式按页对翻（+2 / -2），单页按 1。
-            int step = IsDoublePage ? 2 : 1;
-            int target = CurrentPage + (direction == PresentationNavigation.Next ? step : -step);
+            int target = CurrentPage + (direction == PresentationNavigation.Next ? 1 : -1);
             if (target < 0 || target >= PageCount) return 0;
 
-            await GoToPageAsync(target, cancellationToken).ConfigureAwait(false);
+            await ScrollToPageTopAsync(target, cancellationToken).ConfigureAwait(false);
             return CurrentPage + 1;
         }
 
-        /// <summary>
-        /// 退出宿主放映模式。仅在确实进入过（服务存在且文档已打开）时才调用，
-        /// 避免对未激活的演示源发起无谓的结束请求。不 await：关闭是同步路径。
-        /// </summary>
+        /// <summary>退出宿主放映模式。</summary>
         private void EndPresentation()
         {
             if (_presentation == null || !_presentationActive) return;
             _presentationActive = false;
 
-            // 主动结束时先退订：否则宿主 EndAsync 触发 Ended 事件又会调 OnPresentationEnded → Close，
-            // 造成递归关闭。
             try { _presentation.Ended -= OnPresentationEnded; }
             catch { }
 
@@ -209,8 +236,6 @@ namespace PdfReader
         {
             if (_backgroundView != null && _composition.HasBackgroundLayer) return;
 
-            // 工厂在宿主的 UI 线程被同步调用（RunOnUiThread 内），返回前 _backgroundView 必已赋值，
-            // 因此本方法返回后即可安全地向它推送位图。
             PdfBackgroundView created = null;
             _composition.InjectBackgroundLayer(() =>
             {
@@ -226,21 +251,14 @@ namespace PdfReader
         {
             var view = sender as PdfBackgroundView;
             AttachWheelHandler(view);
-
-            // 布局完成后才有确切的 ActualWidth/Height，此时同步一次内容矩形。
-            if (view != null) SyncPageContentRect(view);
+            if (view != null) SyncVisiblePagesAsync();
         }
 
-        /// <summary>画布尺寸变化会改变 Uniform 后的页面矩形，需要重新同步给宿主。</summary>
         private void BackgroundView_SizeChanged(object sender, SizeChangedEventArgs e)
         {
-            if (sender is PdfBackgroundView view) SyncPageContentRect(view);
+            if (sender is PdfBackgroundView view) SyncVisiblePagesAsync();
         }
 
-        /// <summary>
-        /// 背景层 IsHitTestVisible = false，收不到滚轮事件，因此挂到宿主窗口的
-        /// PreviewMouseWheel（隧道事件，窗口先于任何子元素收到）。
-        /// </summary>
         private void AttachWheelHandler(PdfBackgroundView view)
         {
             if (view == null) return;
@@ -267,7 +285,6 @@ namespace PdfReader
         {
             if (!IsOpen) return;
 
-            // 仅在指针位于背景层范围内时接管，避免抢走工具栏、弹窗里的滚动。
             var view = _backgroundView;
             if (view == null || !view.IsVisible) return;
 
@@ -278,248 +295,166 @@ namespace PdfReader
             if (local.X < 0 || local.Y < 0 || local.X > view.ActualWidth || local.Y > view.ActualHeight)
                 return;
 
-            if (HandleMouseWheel(e.Delta)) e.Handled = true;
+            if (HandleScroll(e.Delta)) e.Handled = true;
         }
 
-        /// <summary>页码变化通知（含滚轮翻页），供插件刷新弹窗与保存配置。</summary>
+        /// <summary>页码变化通知。</summary>
         public event Action<int> PageChanged;
 
-        /// <summary>滚轮向下翻到下一页，向上翻到上一页。返回 true 表示事件已被 PDF 会话接管。</summary>
-        public bool HandleMouseWheel(int delta)
+        /// <summary>滚轮滚动。返回 true 表示事件已被 PDF 会话接管。</summary>
+        public bool HandleScroll(int delta)
         {
             if (!IsOpen || delta == 0) return false;
 
-            // 一个滚轮刻度通常会产生多个 PreviewMouseWheel；一次翻页动画未完成前丢弃后续事件。
-            if (Interlocked.CompareExchange(ref _turning, 1, 0) != 0) return true;
-
-            _ = TurnFromWheelAsync(delta < 0);
+            // 每格约 60 DIP。
+            double step = delta > 0 ? 60 : -60;
+            _ = ScrollByAsync(step);
             return true;
         }
 
-        private async Task TurnFromWheelAsync(bool forward)
+        /// <summary>按增量滚动，墨迹实时跟随。</summary>
+        public async Task ScrollByAsync(double deltaY)
         {
-            try
-            {
-                // 双页模式滚轮也按页对翻（+2 / -2），与按钮/翻页条保持一致，
-                // 否则左右页对错位，右页墨迹看起来"不跟随"。
-                int step = IsDoublePage ? 2 : 1;
-                int target = CurrentPage + (forward ? step : -step);
-                if (target < 0 || target >= PageCount) return;
-                await GoToPageAsync(target, CancellationToken.None).ConfigureAwait(false);
-            }
-            finally
-            {
-                // 留出很短的间隔，避免触控板惯性在一页完成后立即连翻多页。
-                await Task.Delay(90).ConfigureAwait(false);
-                Interlocked.Exchange(ref _turning, 0);
-            }
-        }
+            if (deltaY == 0) return;
 
-        /// <summary>翻到指定页：先渲染背景，再让宿主切换该页墨迹。</summary>
-        public async Task GoToPageAsync(int pageIndex, CancellationToken cancellationToken)
-        {
-            int total;
-            lock (_gate)
-            {
-                if (_document == null) return;
-                total = (int)_document.PageCount;
-            }
-
-            int target = ClampPage(pageIndex, total);
-            int from = CurrentPage;
-            if (target == from) return;
-
-            lock (_gate) { _currentPage = target; }
-
-            await RenderCurrentPageAsync(cancellationToken, animate: true, forward: target > from)
-                .ConfigureAwait(false);
-
-            // 背景已经是新页，此时再交给宿主换墨迹，避免出现「旧墨迹压新页」的一帧。
-            // 单双页统一走可见页列表：宿主按每页矩形裁剪画布墨迹存回对应页，
-            // 保证可见页列表始终与当前页同步（否则模式切换时墨迹会裁错页）。
-            await SyncVisiblePagesAsync(cancellationToken).ConfigureAwait(false);
-
-            _config.LastPageIndex = target;
-
-            // 同步宿主翻页条的页码：滚轮/弹窗按钮翻页不经过宿主翻页条的回调，
-            // 若不主动调用 UpdatePageAsync，翻页条会一直显示旧页码。
-            if (_presentationActive)
-            {
-                try
-                {
-                    _ = _presentation.UpdatePageAsync(target + 1);
-                }
-                catch (Exception ex)
-                {
-                    _logError?.Invoke("同步放映模式页码失败", ex);
-                }
-            }
-
-            try { PageChanged?.Invoke(target); }
-            catch (Exception ex) { _logError?.Invoke("PDF 页码变化通知失败", ex); }
-        }
-
-        public Task NextPageAsync(CancellationToken cancellationToken)
-            => GoToPageAsync(CurrentPage + (IsDoublePage ? 2 : 1), cancellationToken);
-
-        public Task PreviousPageAsync(CancellationToken cancellationToken)
-            => GoToPageAsync(CurrentPage - (IsDoublePage ? 2 : 1), cancellationToken);
-
-        /// <summary>
-        /// 在单页与双页之间切换。当前页保留为左页（双页时对齐到偶数页对起点）。
-        /// </summary>
-        public async Task SetDoublePageModeAsync(bool enabled, CancellationToken cancellationToken)
-        {
-            if (IsDoublePage == enabled) return;
-
-            IsDoublePage = enabled;
-
-            if (enabled)
-            {
-                // 对齐到偶数页对起点：0-1、2-3、4-5…
-                int left = CurrentPage / 2 * 2;
-                if (left != CurrentPage)
-                {
-                    lock (_gate) { _currentPage = left; }
-                }
-            }
-
-            await RenderCurrentPageAsync(cancellationToken).ConfigureAwait(false);
-
-            // 统一走可见页列表：宿主会先把画布墨迹按旧可见页矩形存回各物理页，
-            // 再恢复新模式下的可见页墨迹。这样单/双页切换时墨迹不会丢失或错位。
-            await SyncVisiblePagesAsync(cancellationToken).ConfigureAwait(false);
-
-            // 同步翻页条页码。
-            if (_presentationActive)
-            {
-                try { _ = _presentation.UpdatePageAsync(CurrentPage + 1); }
-                catch (Exception ex) { _logError?.Invoke("同步放映模式页码失败", ex); }
-            }
-
-            try { PageChanged?.Invoke(CurrentPage); }
-            catch (Exception ex) { _logError?.Invoke("PDF 页码变化通知失败", ex); }
-        }
-
-        private async Task RenderCurrentPageAsync(CancellationToken cancellationToken,
-            bool animate = false, bool forward = true)
-        {
-            CancellationTokenSource cts;
-            lock (_gate)
-            {
-                _renderCts?.Cancel();
-                _renderCts?.Dispose();
-                _renderCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-                cts = _renderCts;
-            }
-
-            int page = CurrentPage;
-            try
-            {
-                if (IsDoublePage)
-                {
-                    var left = await RenderPageAsync(page, cts.Token).ConfigureAwait(false);
-                    var right = page + 1 < PageCount
-                        ? await RenderPageAsync(page + 1, cts.Token).ConfigureAwait(false)
-                        : null;
-                    if (cts.IsCancellationRequested) return;
-                    ApplyBackground(left, right, animate, forward);
-                }
-                else
-                {
-                    var bitmap = await RenderPageAsync(page, cts.Token).ConfigureAwait(false);
-                    if (bitmap == null || cts.IsCancellationRequested) return;
-                    ApplyBackground(bitmap, null, animate, forward);
-                }
-            }
-            catch (OperationCanceledException)
-            {
-                // 被后续翻页取代，属正常路径。
-            }
-            catch (Exception ex)
-            {
-                _logError?.Invoke(string.Format(Strings.ErrorRenderFailedFormat, page + 1), ex);
-            }
-        }
-
-        private void ApplyBackground(BitmapSource bitmap, BitmapSource rightBitmap,
-            bool animate = false, bool forward = true)
-        {
             var view = _backgroundView;
             if (view == null) return;
 
-            Action apply = () =>
-            {
-                if (IsDoublePage)
-                {
-                    if (animate) view.SetDoublePageWithSlide(bitmap, rightBitmap, forward);
-                    else view.SetDoublePage(bitmap, rightBitmap);
-                }
-                else
-                {
-                    if (animate) view.SetSinglePageWithSlide(bitmap, forward);
-                    else view.SetSinglePage(bitmap);
-                }
+            double viewportH = view.ActualHeight;
+            double maxOffset = Math.Max(0, view.StripHeight - viewportH);
 
-                // 页面按 Uniform 居中留边，导出必须知道真正的页面区域，
-                // 否则会被拉伸成整块画布的比例（16:9），墨迹也跟着错位。
-                SyncPageContentRect(view);
-            };
+            // 计算新偏移并夹取边界。
+            double newOffset = view.ScrollOffset + deltaY;
+            if (newOffset < 0) newOffset = 0;
+            if (newOffset > maxOffset) newOffset = maxOffset;
+            double actualDelta = newOffset - view.ScrollOffset;
+            if (actualDelta == 0) return;
 
-            if (view.Dispatcher.CheckAccess()) apply();
-            else view.Dispatcher.Invoke(apply);
-        }
+            // 1. 平移背景长条。
+            if (view.Dispatcher.CheckAccess()) view.SetScrollOffset(newOffset);
+            else await view.Dispatcher.InvokeAsync(() => view.SetScrollOffset(newOffset));
 
-        /// <summary>把当前页在背景层内的实际矩形同步给宿主，供导出裁剪与墨迹换算。</summary>
-        private void SyncPageContentRect(PdfBackgroundView view)
-        {
+            // 2. 宿主实时平移墨迹。
             try
             {
-                // 双页模式的墨迹矩形由 SyncVisiblePagesAsync 通过 SetVisiblePagesAsync 提交，
-                // 单页这里用 SetPageContentRect 告知宿主页面区域。
-                if (IsDoublePage) return;
-
-                // 刚换图时布局可能未更新，先强制测量一次再取矩形。
-                view.UpdateLayout();
-                var pages = view.GetVisiblePageRects(CurrentPage);
-                if (pages != null && pages.Count > 0)
-                    _composition.SetPageContentRect(pages[0].ContentRect);
+                await _composition.ScrollOffsetAsync(actualDelta, CancellationToken.None).ConfigureAwait(false);
             }
             catch (Exception ex)
             {
-                _logError?.Invoke("同步 PDF 页面内容矩形失败", ex);
+                _logError?.Invoke("滚动墨迹跟随失败", ex);
             }
+
+            // 3. 更新当前页（视口顶部页）。
+            UpdateCurrentPageFromScroll();
+
+            // 4. 去抖后重建可见页墨迹。
+            ScheduleSettleSync();
         }
 
-        /// <summary>
-        /// 把当前可见页列表（双页为左右两页，单页为一页）连同各自矩形提交给宿主，
-        /// 宿主按矩形把画布墨迹切分存入各物理页。
-        /// </summary>
-        private async Task SyncVisiblePagesAsync(CancellationToken cancellationToken)
+        /// <summary>滚动到指定页顶部。</summary>
+        public async Task ScrollToPageTopAsync(int pageIndex, CancellationToken cancellationToken)
         {
             var view = _backgroundView;
-            if (view == null) return;
+            if (view == null || !IsOpen) return;
 
-            IReadOnlyList<PluginVisiblePage> pages;
+            int target = ClampPage(pageIndex, PageCount);
+            double viewportH = view.ActualHeight;
+
+            double pageTop;
             if (view.Dispatcher.CheckAccess())
             {
-                view.UpdateLayout();
-                pages = view.GetVisiblePageRects(CurrentPage);
+                pageTop = Canvas.GetTop(view.GetPageImage(target));
             }
             else
             {
-                pages = await view.Dispatcher.InvokeAsync(() =>
-                {
-                    view.UpdateLayout();
-                    return view.GetVisiblePageRects(CurrentPage);
-                }).Task;
+                pageTop = await view.Dispatcher.InvokeAsync(
+                    () => Canvas.GetTop(view.GetPageImage(target))).Task;
             }
 
-            if (pages == null || pages.Count == 0) return;
+            double maxOffset = Math.Max(0, view.StripHeight - viewportH);
+            double newOffset = Math.Max(0, Math.Min(pageTop, maxOffset));
+
+            await ScrollToOffsetAsync(newOffset, cancellationToken).ConfigureAwait(false);
+        }
+
+        /// <summary>滚动到绝对偏移。</summary>
+        private async Task ScrollToOffsetAsync(double newOffset, CancellationToken cancellationToken)
+        {
+            var view = _backgroundView;
+            if (view == null) return;
+
+            double delta = newOffset - view.ScrollOffset;
+            if (Math.Abs(delta) < 0.5) return;
+
+            if (view.Dispatcher.CheckAccess()) view.SetScrollOffset(newOffset);
+            else await view.Dispatcher.InvokeAsync(() => view.SetScrollOffset(newOffset));
 
             try
             {
-                await _composition.SetVisiblePagesAsync(pages, cancellationToken).ConfigureAwait(false);
+                await _composition.ScrollOffsetAsync(delta, cancellationToken).ConfigureAwait(false);
+            }
+            catch (Exception ex)
+            {
+                _logError?.Invoke("滚动墨迹跟随失败", ex);
+            }
+
+            UpdateCurrentPageFromScroll();
+            ScheduleSettleSync();
+        }
+
+        /// <summary>根据滚动偏移计算视口顶部页，并通知页码变化。</summary>
+        private void UpdateCurrentPageFromScroll()
+        {
+            var view = _backgroundView;
+            if (view == null) return;
+
+            double offset = view.ScrollOffset;
+            double viewportH = view.ActualHeight;
+
+            // 找视口顶部覆盖的页。
+            int topPage = 0;
+            if (view.Dispatcher.CheckAccess())
+            {
+                topPage = view.GetPageIndexAtOffset(offset + 1);
+            }
+
+            lock (_gate)
+            {
+                _currentPage = ClampPage(topPage, PageCount);
+                int page = _currentPage;
+                _config.LastPageIndex = page;
+                try { PageChanged?.Invoke(page); }
+                catch (Exception ex) { _logError?.Invoke("PDF 页码变化通知失败", ex); }
+            }
+        }
+
+        /// <summary>滚动停止去抖后重建可见页集合，让宿主把墨迹切分/恢复到位。</summary>
+        private void ScheduleSettleSync()
+        {
+            _scrollSettleCts?.Cancel();
+            _scrollSettleCts?.Dispose();
+            _scrollSettleCts = new CancellationTokenSource();
+            var token = _scrollSettleCts.Token;
+
+            _ = Task.Delay(180, token).ContinueWith(t =>
+            {
+                if (t.IsCanceled || !token.IsCancellationRequested) return;
+                SyncVisiblePagesAsync();
+            }, token);
+        }
+
+        /// <summary>把当前可见页集合提交给宿主（按长条矩形切分/恢复墨迹）。</summary>
+        private void SyncVisiblePagesAsync()
+        {
+            var view = _backgroundView;
+            if (view == null) return;
+
+            try
+            {
+                var pages = view.GetVisiblePageRects(view.ActualHeight);
+                if (pages == null || pages.Count == 0) return;
+
+                _composition.SetVisiblePagesAsync(pages);
             }
             catch (Exception ex)
             {
@@ -549,14 +484,11 @@ namespace PdfReader
             return bitmap;
         }
 
-        /// <summary>
-        /// 交给宿主的离屏渲染回调：导出时逐页调用（含非当前页）。
-        /// 返回已 Freeze 的位图，宿主据其像素宽度决定合成倍率。
-        /// </summary>
+        /// <summary>交给宿主的离屏渲染回调。</summary>
         private Task<BitmapSource> RenderPageForExportAsync(uint pageIndex, CancellationToken cancellationToken)
             => RenderPageAsync((int)pageIndex, cancellationToken);
 
-        /// <summary>按页面物理尺寸与配置倍率计算渲染宽度，并受 ZoomModel 上限约束。</summary>
+        /// <summary>按页面物理尺寸与配置倍率计算渲染宽度。</summary>
         private int ComputeRenderWidth(PdfDocumentSession document, int pageIndex)
         {
             double pageWidth;
@@ -584,25 +516,23 @@ namespace PdfReader
             int count = PageCount;
             if (count <= 0) throw new InvalidOperationException(Strings.ErrorNoDocument);
 
-            // 宿主切换黑板/清屏等操作可能移除背景层并清空分页状态；导出前重新配置，
-            // 确保宿主拿到当前文档的页数与离屏渲染回调。
             if (!_composition.HasBackgroundLayer || _composition.PageCount != (uint)count)
             {
                 EnsureBackgroundLayer();
                 _composition.ConfigurePages((uint)count, (uint)CurrentPage, RenderPageForExportAsync);
             }
 
-            // 宿主的语义是「从给定页导到末页」，因此固定传 0 以导出整个文档，
-            // 而不是当前浏览到的那一页。
             return _composition.ExportWithInkAsync(outputPath, 0u, cancellationToken);
         }
 
-        /// <summary>关闭文档并移除背景层（宿主会同时清空按页墨迹缓存）。</summary>
+        /// <summary>关闭文档并移除背景层。</summary>
         public void Close()
         {
-            // 先退出放映模式：否则关掉 PDF 后宿主仍停留在放映布局、翻页条还挂着，
-            // 而翻页请求已经没有文档可翻。这里不 await，Close 是同步 API。
             EndPresentation();
+
+            _scrollSettleCts?.Cancel();
+            _scrollSettleCts?.Dispose();
+            _scrollSettleCts = null;
 
             PdfDocumentSession document;
             lock (_gate)
