@@ -34,6 +34,10 @@ namespace PdfReader
         private string _configPath;
         private ReaderConfig _config;
         private ICanvasCompositionService _composition;
+
+        /// <summary>外部演示源服务；宿主较旧时为 null，此时不进入放映模式，其余功能不受影响。</summary>
+        private IPresentationSourceService _presentation;
+
         private INotificationService _notificationService;
         private EmbeddedReaderSession _session;
         private SettingsView _settingsView;
@@ -64,6 +68,13 @@ namespace PdfReader
 
             if (_composition == null)
                 Log("宿主未提供 ICanvasCompositionService，PDF 无法作为画布背景使用。");
+
+            try { _presentation = GetService<IPresentationSourceService>(); }
+            catch
+            {
+                _presentation = null;
+                Log("宿主未提供演示源服务，PDF 将不进入放映模式（滚轮翻页与弹窗控制仍可用）。");
+            }
 
             RegisterToolbarButton(host);
             Log("工具栏组件「" + Strings.PluginName + "」已注册。");
@@ -156,7 +167,7 @@ namespace PdfReader
                 {
                     if (_session == null)
                     {
-                        _session = new EmbeddedReaderSession(_composition, _config, LogError);
+                        _session = new EmbeddedReaderSession(_composition, _presentation, _config, LogError);
                         _session.PageChanged += Session_PageChanged;
                     }
                     session = _session;

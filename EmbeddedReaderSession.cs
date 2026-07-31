@@ -16,7 +16,14 @@ namespace PdfReader
     /// </summary>
     internal sealed class EmbeddedReaderSession : IDisposable
     {
+        /// <summary>本插件在宿主放映模式里的演示源标识。</summary>
+        private const string PresentationSourceId = "com.icc.pdf-reader";
+
         private readonly ICanvasCompositionService _composition;
+
+        /// <summary>外部演示源服务；宿主版本较旧时为 null，此时退化为「不进入放映模式」。</summary>
+        private readonly IPresentationSourceService _presentation;
+
         private readonly ReaderConfig _config;
         private readonly Action<string, Exception> _logError;
 
@@ -34,10 +41,15 @@ namespace PdfReader
         /// <summary>已挂上 PreviewMouseWheel 的宿主窗口。</summary>
         private Window _wheelHost;
 
-        public EmbeddedReaderSession(ICanvasCompositionService composition, ReaderConfig config,
+        /// <summary>是否已成功进入宿主放映模式；退出时据此决定是否调用 EndAsync。</summary>
+        private bool _presentationActive;
+
+        public EmbeddedReaderSession(ICanvasCompositionService composition,
+            IPresentationSourceService presentation, ReaderConfig config,
             Action<string, Exception> logError)
         {
             _composition = composition ?? throw new ArgumentNullException(nameof(composition));
+            _presentation = presentation;
             _config = config ?? new ReaderConfig();
             _logError = logError;
             _cache = new PageRenderCache(8, _config.CacheBudgetBytes);
@@ -84,6 +96,101 @@ namespace PdfReader
             _composition.ConfigurePages((uint)session.PageCount, (uint)_currentPage, RenderPageForExportAsync);
 
             await RenderCurrentPageAsync(cancellationToken).ConfigureAwait(false);
+
+            await BeginPresentationAsync((int)session.PageCount, cancellationToken).ConfigureAwait(false);
+        }
+
+        /// <summary>
+        /// 进入宿主放映模式，让宿主的四个翻页条接管翻页。
+        /// 宿主未提供该服务（旧版本）时静默跳过，PDF 仍可用弹窗与滚轮翻页。
+        /// </summary>
+        private async Task BeginPresentationAsync(int pageCount, CancellationToken cancellationToken)
+        {
+            if (_presentation == null || pageCount <= 0) return;
+
+            try
+            {
+                var descriptor = new PresentationSourceDescriptor
+                {
+                    Id = PresentationSourceId,
+                    Name = Strings.PluginName,
+                    PageCount = pageCount,
+                    // 宿主页码是 1-based，内部索引是 0-based。
+                    CurrentPage = CurrentPage + 1,
+                    NavigateAsync = HandleHostNavigationAsync,
+                    // PDF 没有缩略图跳页 UI，禁用页码点击。
+                    AllowPageNumberClick = false
+                };
+
+                await _presentation.BeginAsync(descriptor, cancellationToken).ConfigureAwait(false);
+
+                // BeginAsync 返回 true 才算真正进入；被真实 PPT 放映拒绝时保持未激活。
+                if (_presentation.IsActive)
+                {
+                    _presentationActive = true;
+
+                    // 宿主侧强制结束（用户点退出按钮、真实 PPT 开始放映等）时，
+                    // 插件要随之关闭文档并移除背景层，否则会残留放映布局。
+                    try { _presentation.Ended += OnPresentationEnded; }
+                    catch { }
+                }
+            }
+            catch (Exception ex)
+            {
+                _logError?.Invoke("进入放映模式失败", ex);
+            }
+        }
+
+        /// <summary>宿主结束外部演示源时触发，插件随之关闭 PDF（等价于"退出=关闭"）。</summary>
+        private void OnPresentationEnded(string sourceId)
+        {
+            if (sourceId != PresentationSourceId) return;
+
+            _presentationActive = false;
+            try { _presentation.Ended -= OnPresentationEnded; }
+            catch { }
+
+            // 宿主已在 UI 线程触发本事件；Close 是同步清理，直接调用。
+            Close();
+        }
+
+        /// <summary>
+        /// 宿主翻页条触发的翻页。返回新页码（1-based），到边界返回 0 让宿主忽略。
+        /// </summary>
+        private async Task<int> HandleHostNavigationAsync(PresentationNavigation direction,
+            CancellationToken cancellationToken)
+        {
+            if (!IsOpen) return 0;
+
+            int target = CurrentPage + (direction == PresentationNavigation.Next ? 1 : -1);
+            if (target < 0 || target >= PageCount) return 0;
+
+            await GoToPageAsync(target, cancellationToken).ConfigureAwait(false);
+            return CurrentPage + 1;
+        }
+
+        /// <summary>
+        /// 退出宿主放映模式。仅在确实进入过（服务存在且文档已打开）时才调用，
+        /// 避免对未激活的演示源发起无谓的结束请求。不 await：关闭是同步路径。
+        /// </summary>
+        private void EndPresentation()
+        {
+            if (_presentation == null || !_presentationActive) return;
+            _presentationActive = false;
+
+            // 主动结束时先退订：否则宿主 EndAsync 触发 Ended 事件又会调 OnPresentationEnded → Close，
+            // 造成递归关闭。
+            try { _presentation.Ended -= OnPresentationEnded; }
+            catch { }
+
+            try
+            {
+                _ = _presentation.EndAsync(PresentationSourceId);
+            }
+            catch (Exception ex)
+            {
+                _logError?.Invoke("退出放映模式失败", ex);
+            }
         }
 
         private void EnsureBackgroundLayer()
@@ -363,6 +470,10 @@ namespace PdfReader
         /// <summary>关闭文档并移除背景层（宿主会同时清空按页墨迹缓存）。</summary>
         public void Close()
         {
+            // 先退出放映模式：否则关掉 PDF 后宿主仍停留在放映布局、翻页条还挂着，
+            // 而翻页请求已经没有文档可翻。这里不 await，Close 是同步 API。
+            EndPresentation();
+
             PdfDocumentSession document;
             lock (_gate)
             {
