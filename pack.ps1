@@ -1,5 +1,6 @@
 # 打包 PdfReader 插件为 .icpx（ZIP）包。
 # .icpx 内容：manifest.json、PdfReader.dll、PdfReader.deps.json
+# 文件名必须与 PluginIndex 里 downloadPath 声明的一致（插件 id），否则市场下载会 404。
 param(
     [string]$Configuration = "Debug",
     [string]$Platform = "x64"
@@ -31,7 +32,7 @@ try {
         Copy-Item $src (Join-Path $staging $f) -Force
     }
 
-    $icpx = Join-Path $root "PdfReader.icpx"
+    $icpx = Join-Path $root "com.icc.pdf-reader.icpx"
     if (Test-Path $icpx) { Remove-Item $icpx -Force }
 
     Add-Type -AssemblyName System.IO.Compression.FileSystem
