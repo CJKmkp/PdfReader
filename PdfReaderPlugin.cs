@@ -136,6 +136,20 @@ namespace PdfReader
             get { lock (_gate) return _session?.PageCount ?? 0; }
         }
 
+        internal PdfDisplayMode DisplayMode
+        {
+            get { lock (_gate) return _session?.DisplayMode ?? PdfDisplayMode.SinglePage; }
+        }
+
+        internal async Task SetDisplayModeAsync(PdfDisplayMode mode)
+        {
+            EmbeddedReaderSession session;
+            lock (_gate) session = _session;
+            if (session?.IsOpen != true) return;
+
+            await session.SetDisplayModeAsync(mode, CancellationToken.None).ConfigureAwait(false);
+        }
+
         internal string StatusText => _statusText;
 
         /// <summary>弹出文件对话框并把选中的 PDF 加载为画布背景。</summary>

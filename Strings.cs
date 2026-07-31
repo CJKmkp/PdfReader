@@ -27,6 +27,7 @@ namespace PdfReader
         public static string Export => IsEnglish ? "Export with ink" : "导出（含墨迹）";
         public static string DoublePage => IsEnglish ? "Two pages" : "双页";
         public static string SinglePage => IsEnglish ? "Single page" : "单页";
+        public static string ContinuousScroll => IsEnglish ? "Continuous" : "连续滚动";
 
         // 状态与提示
         public static string Loading => IsEnglish ? "Loading…" : "正在加载…";

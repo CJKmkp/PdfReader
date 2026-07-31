@@ -12,6 +12,9 @@ namespace PdfReader.Views
     {
         private readonly PdfReaderPlugin _plugin;
 
+        /// <summary>RefreshState 代码赋值 ComboBox 选中项时抑制事件触发，避免循环。</summary>
+        private bool _suppressModeEvent;
+
         internal ReaderPopupContent(PdfReaderPlugin plugin)
         {
             InitializeComponent();
@@ -33,6 +36,11 @@ namespace PdfReader.Views
             NextButton.Content = Strings.NextPage;
             ExportButton.Content = Strings.Export;
             CloseButton.Content = Strings.Close;
+
+            DisplayModeCombo.Items.Clear();
+            DisplayModeCombo.Items.Add(new ComboBoxItem { Content = Strings.SinglePage, Tag = PdfDisplayMode.SinglePage });
+            DisplayModeCombo.Items.Add(new ComboBoxItem { Content = Strings.DoublePage, Tag = PdfDisplayMode.DoublePage });
+            DisplayModeCombo.Items.Add(new ComboBoxItem { Content = Strings.ContinuousScroll, Tag = PdfDisplayMode.ContinuousScroll });
         }
 
         /// <summary>按当前会话状态刷新页码与按钮可用性。</summary>
@@ -49,6 +57,30 @@ namespace PdfReader.Views
             NextButton.IsEnabled = open && page < total - 1;
             ExportButton.IsEnabled = open;
             CloseButton.IsEnabled = open;
+            DisplayModeCombo.IsEnabled = open;
+
+            // 同步模式选择，抑制事件循环。
+            var mode = _plugin?.DisplayMode ?? PdfDisplayMode.SinglePage;
+            foreach (var obj in DisplayModeCombo.Items)
+            {
+                if (obj is ComboBoxItem item && item.Tag is PdfDisplayMode m && m == mode)
+                {
+                    if (!ReferenceEquals(DisplayModeCombo.SelectedItem, item))
+                    {
+                        _suppressModeEvent = true;
+                        DisplayModeCombo.SelectedItem = item;
+                        _suppressModeEvent = false;
+                    }
+                    return;
+                }
+            }
+        }
+
+        private async void DisplayModeCombo_SelectionChanged(object sender, SelectionChangedEventArgs e)
+        {
+            if (_suppressModeEvent || _plugin == null) return;
+            if (DisplayModeCombo.SelectedItem is ComboBoxItem item && item.Tag is PdfDisplayMode mode)
+                await SafeRun(() => _plugin.SetDisplayModeAsync(mode));
         }
 
         private async void OpenButton_Click(object sender, RoutedEventArgs e)

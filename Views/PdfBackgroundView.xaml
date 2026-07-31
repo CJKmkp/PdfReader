@@ -3,11 +3,43 @@
              xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
              Background="#FF1E1E1E"
              ClipToBounds="True">
-    <!-- 连续滚动长条：所有页垂直排列，页间留空白带。滚动通过 StripTransform.TranslateY 实现。 -->
-    <Canvas x:Name="Strip" Background="#FF1E1E1E" ClipToBounds="True"
-            Width="{Binding ActualWidth, RelativeSource={RelativeSource AncestorType=UserControl}}">
-        <Canvas.RenderTransform>
-            <TranslateTransform x:Name="StripTransform" />
-        </Canvas.RenderTransform>
-    </Canvas>
+    <!-- 三种展示模式共用一个背景层：
+         1) 翻页容器（单页/双页）：单页 = 左列铺满；双页 = 左右并排
+         2) 滚动长条：所有页垂直排列，StripTransform.TranslateY 滚动 -->
+    <Grid Background="#FF1E1E1E" ClipToBounds="True">
+        <!-- 翻页容器：单/双页 -->
+        <Grid x:Name="Pager" Background="#FF1E1E1E" ClipToBounds="True">
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition x:Name="LeftColumn" Width="*" />
+                <ColumnDefinition x:Name="RightColumn" Width="0" />
+            </Grid.ColumnDefinitions>
+            <Image x:Name="LeftImage" Grid.Column="0"
+                   Stretch="Uniform"
+                   HorizontalAlignment="Stretch" VerticalAlignment="Stretch"
+                   SnapsToDevicePixels="True"
+                   RenderOptions.BitmapScalingMode="HighQuality">
+                <Image.RenderTransform>
+                    <TranslateTransform x:Name="LeftTransform" />
+                </Image.RenderTransform>
+            </Image>
+            <Image x:Name="RightImage" Grid.Column="1"
+                   Stretch="Uniform"
+                   HorizontalAlignment="Stretch" VerticalAlignment="Stretch"
+                   SnapsToDevicePixels="True"
+                   RenderOptions.BitmapScalingMode="HighQuality"
+                   Visibility="Collapsed">
+                <Image.RenderTransform>
+                    <TranslateTransform x:Name="RightTransform" />
+                </Image.RenderTransform>
+            </Image>
+        </Grid>
+
+        <!-- 连续滚动长条 -->
+        <Canvas x:Name="Strip" Background="#FF1E1E1E" ClipToBounds="True"
+                Visibility="Collapsed">
+            <Canvas.RenderTransform>
+                <TranslateTransform x:Name="StripTransform" />
+            </Canvas.RenderTransform>
+        </Canvas>
+    </Grid>
 </UserControl>
