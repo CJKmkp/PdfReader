@@ -1,0 +1,84 @@
+<UserControl x:Class="PdfReader.Views.SettingsView"
+             xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:ui="http://schemas.inkore.net/lib/ui/wpf/modern"
+             xmlns:ikw="http://schemas.inkore.net/lib/ui/wpf">
+    <UserControl.Resources>
+        <ResourceDictionary>
+            <ResourceDictionary.MergedDictionaries>
+                <ui:ThemeResources/>
+                <ui:XamlControlsResources />
+            </ResourceDictionary.MergedDictionaries>
+        </ResourceDictionary>
+    </UserControl.Resources>
+    <Grid>
+        <ikw:SimpleStackPanel Spacing="12" Margin="16">
+
+            <Border CornerRadius="8" Padding="16"
+                    Background="{DynamicResource CardBackgroundFillColorDefaultBrush}"
+                    BorderBrush="{DynamicResource CardStrokeColorDefaultBrush}" BorderThickness="1">
+                <ikw:SimpleStackPanel Spacing="10">
+                    <TextBlock x:Name="HeaderText" FontSize="14" FontWeight="SemiBold"/>
+                    <TextBlock x:Name="IntroText" TextWrapping="Wrap" Opacity="0.8"
+                               Foreground="{DynamicResource TextFillColorSecondaryBrush}"/>
+                    <Button x:Name="OpenNowButton" Padding="12,6" HorizontalAlignment="Left"
+                            Click="OpenNowButton_Click"/>
+                </ikw:SimpleStackPanel>
+            </Border>
+
+            <Border CornerRadius="8" Padding="16"
+                    Background="{DynamicResource CardBackgroundFillColorDefaultBrush}"
+                    BorderBrush="{DynamicResource CardStrokeColorDefaultBrush}" BorderThickness="1">
+                <ikw:SimpleStackPanel Spacing="10">
+                    <DockPanel>
+                        <TextBlock x:Name="RenderScaleLabel" VerticalAlignment="Center"/>
+                        <StackPanel Orientation="Horizontal" HorizontalAlignment="Right" DockPanel.Dock="Right">
+                            <TextBlock x:Name="RenderScaleValue" VerticalAlignment="Center" MinWidth="48"
+                                       TextAlignment="Right" Margin="0,0,8,0"/>
+                            <Slider x:Name="RenderScaleSlider" Minimum="1" Maximum="4"
+                                    SmallChange="0.5" LargeChange="1" TickFrequency="0.5"
+                                    IsSnapToTickEnabled="True" Width="200"
+                                    VerticalAlignment="Center" ValueChanged="RenderScaleSlider_ValueChanged"/>
+                        </StackPanel>
+                    </DockPanel>
+                    <DockPanel>
+                        <TextBlock x:Name="RememberLabel" VerticalAlignment="Center"/>
+                        <ui:ToggleSwitch x:Name="RememberToggle" HorizontalAlignment="Right"
+                                         DockPanel.Dock="Right" Toggled="RememberToggle_Toggled"/>
+                    </DockPanel>
+                    <DockPanel>
+                        <TextBlock x:Name="CacheBudgetLabel" VerticalAlignment="Center"/>
+                        <StackPanel Orientation="Horizontal" HorizontalAlignment="Right" DockPanel.Dock="Right">
+                            <TextBlock x:Name="CacheBudgetValue" VerticalAlignment="Center" MinWidth="48"
+                                       TextAlignment="Right" Margin="0,0,8,0"/>
+                            <Slider x:Name="CacheBudgetSlider" Minimum="32" Maximum="1024"
+                                    SmallChange="32" LargeChange="64" Width="200"
+                                    VerticalAlignment="Center" ValueChanged="CacheBudgetSlider_ValueChanged"/>
+                        </StackPanel>
+                    </DockPanel>
+                </ikw:SimpleStackPanel>
+            </Border>
+
+            <Border CornerRadius="8" Padding="16"
+                    Background="{DynamicResource CardBackgroundFillColorDefaultBrush}"
+                    BorderBrush="{DynamicResource CardStrokeColorDefaultBrush}" BorderThickness="1">
+                <ikw:SimpleStackPanel Spacing="8">
+                    <TextBlock x:Name="ShortcutsHeader" FontSize="14" FontWeight="SemiBold"/>
+                    <TextBlock x:Name="ShortcutsText" TextWrapping="Wrap" Opacity="0.8"
+                               Foreground="{DynamicResource TextFillColorSecondaryBrush}"/>
+                </ikw:SimpleStackPanel>
+            </Border>
+
+            <Border CornerRadius="8" Padding="16"
+                    Background="{DynamicResource CardBackgroundFillColorDefaultBrush}"
+                    BorderBrush="{DynamicResource CardStrokeColorDefaultBrush}" BorderThickness="1">
+                <ikw:SimpleStackPanel Spacing="8">
+                    <TextBlock x:Name="NotesHeader" FontSize="14" FontWeight="SemiBold"/>
+                    <TextBlock x:Name="NotesText" TextWrapping="Wrap" Opacity="0.8"
+                               Foreground="{DynamicResource TextFillColorSecondaryBrush}"/>
+                </ikw:SimpleStackPanel>
+            </Border>
+
+        </ikw:SimpleStackPanel>
+    </Grid>
+</UserControl>

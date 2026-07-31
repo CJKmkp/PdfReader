@@ -28,6 +28,11 @@
 *.so.*
 *.dylib
 
+# 例外：lib/ 下是编译所需的宿主 SDK 引用（Private=False，不随插件分发），
+# 必须入库，否则 CI 上 dotnet build 会因为找不到引用而失败。
+!lib/InkCanvas.PluginSdk.dll
+!lib/InkCanvas.Controls.dll
+
 # Executables
 *.exe
 *.out
@@ -53,3 +58,10 @@ dkms.conf
 
 # debug information files
 *.dwo
+
+# .NET 构建产物
+bin/
+obj/
+
+# 打包产物
+*.icpx

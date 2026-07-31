@@ -1,0 +1,37 @@
+<UserControl x:Class="PdfReader.Views.ReaderPopupContent"
+             xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+             xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+             xmlns:ikw="http://schemas.inkore.net/lib/ui/wpf"
+             xmlns:controls="clr-namespace:Ink_Canvas.Controls;assembly=InkCanvas.Controls"
+             mc:Ignorable="d"
+             d:DesignWidth="300">
+    <Grid>
+        <!-- 用宿主的 PopupShellContent 包壳，保证标题栏、边框与配色和其它批注面板一致 -->
+        <controls:PopupShellContent x:Name="Shell" d:Visibility="Collapsed" />
+        <ContentControl x:Name="InnerContentHost" Visibility="Collapsed" d:Visibility="Visible">
+            <ikw:SimpleStackPanel Margin="10" Spacing="8" HorizontalAlignment="Stretch">
+                <TextBlock x:Name="StatusText" TextWrapping="Wrap" MaxWidth="260"
+                           Foreground="{DynamicResource FloatingBarForegroundBrush}"
+                           FontSize="13" />
+
+                <ikw:SimpleStackPanel Orientation="Horizontal" Spacing="6" HorizontalAlignment="Center">
+                    <Button x:Name="PreviousButton" Padding="10,4" MinWidth="72"
+                            Click="PreviousButton_Click" />
+                    <TextBlock x:Name="PageText" VerticalAlignment="Center" MinWidth="76"
+                               TextAlignment="Center" FontSize="13" FontWeight="SemiBold"
+                               Foreground="{DynamicResource FloatingBarForegroundBrush}" />
+                    <Button x:Name="NextButton" Padding="10,4" MinWidth="72"
+                            Click="NextButton_Click" />
+                </ikw:SimpleStackPanel>
+
+                <ikw:SimpleStackPanel Orientation="Horizontal" Spacing="6" HorizontalAlignment="Center">
+                    <Button x:Name="OpenButton" Padding="10,4" MinWidth="72" Click="OpenButton_Click" />
+                    <Button x:Name="ExportButton" Padding="10,4" MinWidth="104" Click="ExportButton_Click" />
+                    <Button x:Name="CloseButton" Padding="10,4" MinWidth="88" Click="CloseButton_Click" />
+                </ikw:SimpleStackPanel>
+            </ikw:SimpleStackPanel>
+        </ContentControl>
+    </Grid>
+</UserControl>
