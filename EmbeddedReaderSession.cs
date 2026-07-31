@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.Threading;
 using System.Threading.Tasks;
 using System.Windows;
@@ -43,6 +44,15 @@ namespace PdfReader
 
         /// <summary>是否已成功进入宿主放映模式；退出时据此决定是否调用 EndAsync。</summary>
         private bool _presentationActive;
+
+        /// <summary>双页模式：一次显示 (CurrentPage, CurrentPage+1) 两页，翻页按页对（+2）。</summary>
+        public bool IsDoublePage { get; private set; }
+
+        /// <summary>双页模式下可见页数（末页可能只有一页）。</summary>
+        private int VisiblePageCount =>
+            IsDoublePage && _document != null
+                ? Math.Min(2, (int)_document.PageCount - CurrentPage)
+                : 1;
 
         public EmbeddedReaderSession(ICanvasCompositionService composition,
             IPresentationSourceService presentation, ReaderConfig config,
@@ -162,7 +172,9 @@ namespace PdfReader
         {
             if (!IsOpen) return 0;
 
-            int target = CurrentPage + (direction == PresentationNavigation.Next ? 1 : -1);
+            // 双页模式按页对翻（+2 / -2），单页按 1。
+            int step = IsDoublePage ? 2 : 1;
+            int target = CurrentPage + (direction == PresentationNavigation.Next ? step : -step);
             if (target < 0 || target >= PageCount) return 0;
 
             await GoToPageAsync(target, cancellationToken).ConfigureAwait(false);
@@ -288,7 +300,10 @@ namespace PdfReader
         {
             try
             {
-                int target = CurrentPage + (forward ? 1 : -1);
+                // 双页模式滚轮也按页对翻（+2 / -2），与按钮/翻页条保持一致，
+                // 否则左右页对错位，右页墨迹看起来"不跟随"。
+                int step = IsDoublePage ? 2 : 1;
+                int target = CurrentPage + (forward ? step : -step);
                 if (target < 0 || target >= PageCount) return;
                 await GoToPageAsync(target, CancellationToken.None).ConfigureAwait(false);
             }
@@ -320,7 +335,9 @@ namespace PdfReader
                 .ConfigureAwait(false);
 
             // 背景已经是新页，此时再交给宿主换墨迹，避免出现「旧墨迹压新页」的一帧。
-            await _composition.SetCurrentPageAsync((uint)target, cancellationToken).ConfigureAwait(false);
+            // 单双页统一走可见页列表：宿主按每页矩形裁剪画布墨迹存回对应页，
+            // 保证可见页列表始终与当前页同步（否则模式切换时墨迹会裁错页）。
+            await SyncVisiblePagesAsync(cancellationToken).ConfigureAwait(false);
 
             _config.LastPageIndex = target;
 
@@ -343,10 +360,46 @@ namespace PdfReader
         }
 
         public Task NextPageAsync(CancellationToken cancellationToken)
-            => GoToPageAsync(CurrentPage + 1, cancellationToken);
+            => GoToPageAsync(CurrentPage + (IsDoublePage ? 2 : 1), cancellationToken);
 
         public Task PreviousPageAsync(CancellationToken cancellationToken)
-            => GoToPageAsync(CurrentPage - 1, cancellationToken);
+            => GoToPageAsync(CurrentPage - (IsDoublePage ? 2 : 1), cancellationToken);
+
+        /// <summary>
+        /// 在单页与双页之间切换。当前页保留为左页（双页时对齐到偶数页对起点）。
+        /// </summary>
+        public async Task SetDoublePageModeAsync(bool enabled, CancellationToken cancellationToken)
+        {
+            if (IsDoublePage == enabled) return;
+
+            IsDoublePage = enabled;
+
+            if (enabled)
+            {
+                // 对齐到偶数页对起点：0-1、2-3、4-5…
+                int left = CurrentPage / 2 * 2;
+                if (left != CurrentPage)
+                {
+                    lock (_gate) { _currentPage = left; }
+                }
+            }
+
+            await RenderCurrentPageAsync(cancellationToken).ConfigureAwait(false);
+
+            // 统一走可见页列表：宿主会先把画布墨迹按旧可见页矩形存回各物理页，
+            // 再恢复新模式下的可见页墨迹。这样单/双页切换时墨迹不会丢失或错位。
+            await SyncVisiblePagesAsync(cancellationToken).ConfigureAwait(false);
+
+            // 同步翻页条页码。
+            if (_presentationActive)
+            {
+                try { _ = _presentation.UpdatePageAsync(CurrentPage + 1); }
+                catch (Exception ex) { _logError?.Invoke("同步放映模式页码失败", ex); }
+            }
+
+            try { PageChanged?.Invoke(CurrentPage); }
+            catch (Exception ex) { _logError?.Invoke("PDF 页码变化通知失败", ex); }
+        }
 
         private async Task RenderCurrentPageAsync(CancellationToken cancellationToken,
             bool animate = false, bool forward = true)
@@ -363,9 +416,21 @@ namespace PdfReader
             int page = CurrentPage;
             try
             {
-                var bitmap = await RenderPageAsync(page, cts.Token).ConfigureAwait(false);
-                if (bitmap == null || cts.IsCancellationRequested) return;
-                ApplyBackground(bitmap, animate, forward);
+                if (IsDoublePage)
+                {
+                    var left = await RenderPageAsync(page, cts.Token).ConfigureAwait(false);
+                    var right = page + 1 < PageCount
+                        ? await RenderPageAsync(page + 1, cts.Token).ConfigureAwait(false)
+                        : null;
+                    if (cts.IsCancellationRequested) return;
+                    ApplyBackground(left, right, animate, forward);
+                }
+                else
+                {
+                    var bitmap = await RenderPageAsync(page, cts.Token).ConfigureAwait(false);
+                    if (bitmap == null || cts.IsCancellationRequested) return;
+                    ApplyBackground(bitmap, null, animate, forward);
+                }
             }
             catch (OperationCanceledException)
             {
@@ -377,15 +442,24 @@ namespace PdfReader
             }
         }
 
-        private void ApplyBackground(BitmapSource bitmap, bool animate = false, bool forward = true)
+        private void ApplyBackground(BitmapSource bitmap, BitmapSource rightBitmap,
+            bool animate = false, bool forward = true)
         {
             var view = _backgroundView;
             if (view == null) return;
 
             Action apply = () =>
             {
-                if (animate) view.SetPageWithSlide(bitmap, forward);
-                else view.SetPage(bitmap);
+                if (IsDoublePage)
+                {
+                    if (animate) view.SetDoublePageWithSlide(bitmap, rightBitmap, forward);
+                    else view.SetDoublePage(bitmap, rightBitmap);
+                }
+                else
+                {
+                    if (animate) view.SetSinglePageWithSlide(bitmap, forward);
+                    else view.SetSinglePage(bitmap);
+                }
 
                 // 页面按 Uniform 居中留边，导出必须知道真正的页面区域，
                 // 否则会被拉伸成整块画布的比例（16:9），墨迹也跟着错位。
@@ -401,13 +475,55 @@ namespace PdfReader
         {
             try
             {
+                // 双页模式的墨迹矩形由 SyncVisiblePagesAsync 通过 SetVisiblePagesAsync 提交，
+                // 单页这里用 SetPageContentRect 告知宿主页面区域。
+                if (IsDoublePage) return;
+
                 // 刚换图时布局可能未更新，先强制测量一次再取矩形。
                 view.UpdateLayout();
-                _composition.SetPageContentRect(view.GetPageContentRect());
+                var pages = view.GetVisiblePageRects(CurrentPage);
+                if (pages != null && pages.Count > 0)
+                    _composition.SetPageContentRect(pages[0].ContentRect);
             }
             catch (Exception ex)
             {
                 _logError?.Invoke("同步 PDF 页面内容矩形失败", ex);
+            }
+        }
+
+        /// <summary>
+        /// 把当前可见页列表（双页为左右两页，单页为一页）连同各自矩形提交给宿主，
+        /// 宿主按矩形把画布墨迹切分存入各物理页。
+        /// </summary>
+        private async Task SyncVisiblePagesAsync(CancellationToken cancellationToken)
+        {
+            var view = _backgroundView;
+            if (view == null) return;
+
+            IReadOnlyList<PluginVisiblePage> pages;
+            if (view.Dispatcher.CheckAccess())
+            {
+                view.UpdateLayout();
+                pages = view.GetVisiblePageRects(CurrentPage);
+            }
+            else
+            {
+                pages = await view.Dispatcher.InvokeAsync(() =>
+                {
+                    view.UpdateLayout();
+                    return view.GetVisiblePageRects(CurrentPage);
+                }).Task;
+            }
+
+            if (pages == null || pages.Count == 0) return;
+
+            try
+            {
+                await _composition.SetVisiblePagesAsync(pages, cancellationToken).ConfigureAwait(false);
+            }
+            catch (Exception ex)
+            {
+                _logError?.Invoke("同步 PDF 可见页失败", ex);
             }
         }
 

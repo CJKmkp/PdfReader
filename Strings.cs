@@ -25,6 +25,8 @@ namespace PdfReader
         public static string PrevPage => IsEnglish ? "Previous page" : "上一页";
         public static string NextPage => IsEnglish ? "Next page" : "下一页";
         public static string Export => IsEnglish ? "Export with ink" : "导出（含墨迹）";
+        public static string DoublePage => IsEnglish ? "Two pages" : "双页";
+        public static string SinglePage => IsEnglish ? "Single page" : "单页";
 
         // 状态与提示
         public static string Loading => IsEnglish ? "Loading…" : "正在加载…";

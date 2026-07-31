@@ -12,6 +12,9 @@ namespace PdfReader.Views
     {
         private readonly PdfReaderPlugin _plugin;
 
+        /// <summary>RefreshState 代码赋值 IsChecked 时抑制事件触发，避免循环。</summary>
+        private bool _suppressDoublePageEvent;
+
         internal ReaderPopupContent(PdfReaderPlugin plugin)
         {
             InitializeComponent();
@@ -33,6 +36,7 @@ namespace PdfReader.Views
             NextButton.Content = Strings.NextPage;
             ExportButton.Content = Strings.Export;
             CloseButton.Content = Strings.Close;
+            DoublePageButton.Content = Strings.DoublePage;
         }
 
         /// <summary>按当前会话状态刷新页码与按钮可用性。</summary>
@@ -41,14 +45,40 @@ namespace PdfReader.Views
             bool open = _plugin?.IsDocumentOpen == true;
             int page = _plugin?.CurrentPage ?? 0;
             int total = _plugin?.PageCount ?? 0;
+            bool isDouble = _plugin?.IsDoublePage == true;
 
             PageText.Text = open ? string.Format(Strings.PageOfFormat, page + 1, total) : "—";
             StatusText.Text = _plugin?.StatusText ?? string.Empty;
 
             PreviousButton.IsEnabled = open && page > 0;
-            NextButton.IsEnabled = open && page < total - 1;
+            NextButton.IsEnabled = open && page < total - (isDouble ? 2 : 1);
             ExportButton.IsEnabled = open;
             CloseButton.IsEnabled = open;
+            DoublePageButton.IsEnabled = open;
+
+            // 同步双页按钮状态，但抑制事件循环（代码赋值会触发 Checked/Unchecked）。
+            if (DoublePageButton.IsChecked != isDouble)
+            {
+                _suppressDoublePageEvent = true;
+                DoublePageButton.IsChecked = isDouble;
+                _suppressDoublePageEvent = false;
+            }
+        }
+
+        private async void DoublePageButton_Checked(object sender, RoutedEventArgs e)
+        {
+            await OnDoublePageToggle(true);
+        }
+
+        private async void DoublePageButton_Unchecked(object sender, RoutedEventArgs e)
+        {
+            await OnDoublePageToggle(false);
+        }
+
+        private async System.Threading.Tasks.Task OnDoublePageToggle(bool enabled)
+        {
+            if (_suppressDoublePageEvent || _plugin == null) return;
+            await SafeRun(() => _plugin.SetDoublePageModeAsync(enabled));
         }
 
         private async void OpenButton_Click(object sender, RoutedEventArgs e)
