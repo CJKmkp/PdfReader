@@ -85,7 +85,7 @@ jobs:
           Copy-Item (Join-Path $outDir 'PdfReader.dll') $staging -Force
           Copy-Item (Join-Path $outDir 'PdfReader.deps.json') $staging -Force
 
-          $icpx = Join-Path (Get-Location) 'PdfReader.icpx'
+          $icpx = Join-Path (Get-Location) 'com.icc.pdf-reader.icpx'
           if (Test-Path $icpx) { Remove-Item $icpx -Force }
           Add-Type -AssemblyName System.IO.Compression.FileSystem
           [System.IO.Compression.ZipFile]::CreateFromDirectory($staging, $icpx)
@@ -106,11 +106,11 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: PdfReader-icpx
-          path: PdfReader.icpx
+          path: com.icc.pdf-reader.icpx
           if-no-files-found: error
 
       - name: Attach to release
         if: github.event_name == 'release'
         uses: softprops/action-gh-release@v2
         with:
-          files: PdfReader.icpx
+          files: com.icc.pdf-reader.icpx
