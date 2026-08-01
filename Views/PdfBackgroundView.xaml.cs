@@ -249,10 +249,15 @@ namespace PdfReader.Views
             StripTransform.Y = -_scrollOffset;
         }
 
-        /// <summary>重新布局长条（页面 Uniform 居中）。</summary>
+        /// <summary>
+        /// 重新布局长条（页面 Uniform 居中）。页面宽度用与单页模式相同的
+        /// <see cref="ComputeUniformRect"/> 逻辑（scale = min(viewW/imgW, viewH/imgH)），
+        /// 保证同一页在单页与长条模式下宽度一致，避免模式切换时墨迹缩放错位。
+        /// </summary>
         private void RecomputeStripLayout()
         {
             double viewW = ActualWidth;
+            double viewH = ActualHeight;
             if (viewW <= 0) return;
 
             double top = 0;
@@ -262,8 +267,12 @@ namespace PdfReader.Views
                 var source = _pageSources[i];
                 double imgW = source?.Width ?? 612;
                 double imgH = source?.Height ?? 792;
-                double w = Math.Min(viewW, imgW);
-                double h = w * (imgH / imgW);
+
+                // 与单页模式 ComputeUniformRect 相同的 Uniform 计算。
+                double scale = Math.Min(viewW / imgW, viewH > 0 ? viewH / imgH : 1.0);
+                double w = imgW * scale;
+                double h = imgH * scale;
+
                 img.Width = w;
                 Canvas.SetLeft(img, (viewW - w) / 2);
                 Canvas.SetTop(img, top);
@@ -273,7 +282,10 @@ namespace PdfReader.Views
             Strip.Height = StripHeight;
         }
 
-        /// <summary>长条模式下视口内可见页矩形（长条坐标）。</summary>
+        /// <summary>
+        /// 长条模式下视口内可见页矩形（画布坐标：长条坐标减去滚动偏移）。
+        /// 宿主用它在画布坐标系裁剪/恢复墨迹，因此必须与墨迹坐标系一致。
+        /// </summary>
         public IReadOnlyList<PluginVisiblePage> GetStripVisiblePageRects(double viewportHeight)
         {
             var list = new List<PluginVisiblePage>();
@@ -285,10 +297,10 @@ namespace PdfReader.Views
                 var img = _pageImages[i];
                 double w = img.ActualWidth > 0 ? img.ActualWidth : img.Width;
                 double h = img.ActualHeight > 0 ? img.ActualHeight : img.Height;
-                double pageTop = Canvas.GetTop(img);
+                double pageTop = Canvas.GetTop(img) - _scrollOffset;
                 double pageBottom = pageTop + h;
 
-                if (pageBottom > _scrollOffset && pageTop < _scrollOffset + viewportHeight)
+                if (pageBottom > 0 && pageTop < viewportHeight)
                 {
                     list.Add(new PluginVisiblePage
                     {
@@ -334,7 +346,7 @@ namespace PdfReader.Views
                 var img = _pageImages[pageIndex];
                 double w = img.ActualWidth > 0 ? img.ActualWidth : img.Width;
                 double h = img.ActualHeight > 0 ? img.ActualHeight : img.Height;
-                double top = Canvas.GetTop(img);
+                double top = Canvas.GetTop(img) - _scrollOffset;
                 return new Rect((ActualWidth - w) / 2, top, w, h);
             }
 

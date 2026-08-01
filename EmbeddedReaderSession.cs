@@ -145,14 +145,16 @@ namespace PdfReader
         {
             if (_displayMode == mode) return;
 
+            // 先记录新模式：即使文档未打开（IsOpen false）也要保存，
+            // 这样用户先选模式再打开 PDF 时，OpenAsync 能按所选模式初始化。
+            lock (_gate) { _displayMode = mode; }
+
             var view = _backgroundView;
             if (view == null || !IsOpen) return;
 
             // 切换前先按旧模式保存当前画布墨迹到对应页，
             // 否则宿主可见页矩形还没变，墨迹仍按旧坐标系，切到新模式后错位。
             await SyncVisiblePagesAsync(cancellationToken).ConfigureAwait(false);
-
-            lock (_gate) { _displayMode = mode; }
 
             if (view.Dispatcher.CheckAccess()) view.SetDisplayMode(mode);
             else await view.Dispatcher.InvokeAsync(() => view.SetDisplayMode(mode));
