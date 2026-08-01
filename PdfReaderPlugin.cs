@@ -236,7 +236,8 @@ namespace PdfReader
             lock (_gate) session = _session;
             if (session?.IsOpen != true) return;
 
-            await session.ScrollToPageTopAsync(session.CurrentPage + 1, CancellationToken.None).ConfigureAwait(false);
+            // 走会话的按模式分派：翻页模式翻页，滚动模式滚到下一页顶部。
+            await session.NextPageAsync(CancellationToken.None).ConfigureAwait(false);
         }
 
         internal async Task PreviousPageAsync()
@@ -245,7 +246,7 @@ namespace PdfReader
             lock (_gate) session = _session;
             if (session?.IsOpen != true) return;
 
-            await session.ScrollToPageTopAsync(session.CurrentPage - 1, CancellationToken.None).ConfigureAwait(false);
+            await session.PreviousPageAsync(CancellationToken.None).ConfigureAwait(false);
         }
 
         /// <summary>弹出保存对话框并导出「背景 + 墨迹」。</summary>

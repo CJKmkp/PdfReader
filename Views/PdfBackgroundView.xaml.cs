@@ -53,6 +53,15 @@ namespace PdfReader.Views
         public PdfBackgroundView()
         {
             InitializeComponent();
+            // 尺寸变化（背景层完成布局，ActualWidth 从 0 变非 0）时重算长条页面尺寸，
+            // 否则 RecomputeStripLayout 因 viewW<=0 提前返回，长条显示全空。
+            SizeChanged += OnViewSizeChanged;
+        }
+
+        private void OnViewSizeChanged(object sender, SizeChangedEventArgs e)
+        {
+            if (_mode == PdfDisplayMode.ContinuousScroll && _pageImages.Count > 0)
+                RecomputeStripLayout();
         }
 
         /// <summary>当前展示模式。</summary>
@@ -85,6 +94,15 @@ namespace PdfReader.Views
                 case PdfDisplayMode.ContinuousScroll:
                     Pager.Visibility = Visibility.Collapsed;
                     Strip.Visibility = Visibility.Visible;
+                    // 进入滚动模式时从顶部开始，随后由会话滚动到当前页顶部；
+                    // 否则复用会话时残留旧偏移，长条起步位置不可预期。
+                    SetScrollOffset(0);
+                    // Strip 刚变为可见时 ActualWidth 可能还没布局好，延迟到下一帧重算长条，
+                    // 否则页面 Image 尺寸为 0，长条显示全空。
+                    Dispatcher.BeginInvoke(new Action(() =>
+                    {
+                        if (_pageImages.Count > 0) RecomputeStripLayout();
+                    }), System.Windows.Threading.DispatcherPriority.Loaded);
                     break;
             }
         }
@@ -230,6 +248,9 @@ namespace PdfReader.Views
                 top += img.Width * (img.Source?.Height / (img.Source?.Width ?? 1) ?? 1.414) + PageGutter;
             }
             StripHeight = top - PageGutter;
+            // 强制布局，确保 ActualWidth 非 0，否则 RecomputeStripLayout 会因 viewW<=0 提前返回，
+            // 页面 Image 尺寸保持 0，长条显示全灰/空白。
+            UpdateLayout();
             RecomputeStripLayout();
         }
 
@@ -274,6 +295,7 @@ namespace PdfReader.Views
                 double h = imgH * scale;
 
                 img.Width = w;
+                img.Height = h;
                 Canvas.SetLeft(img, (viewW - w) / 2);
                 Canvas.SetTop(img, top);
                 top += h + PageGutter;

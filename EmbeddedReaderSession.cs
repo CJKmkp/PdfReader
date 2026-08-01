@@ -52,6 +52,12 @@ namespace PdfReader
         /// <summary>当前展示模式。</summary>
         private PdfDisplayMode _displayMode = PdfDisplayMode.SinglePage;
 
+        /// <summary>
+        /// 展示模式切换/文档重载进行中：屏蔽 SizeChanged/去抖触发的无参可见页同步，
+        /// 避免用中间态矩形误清画布墨迹（切换瞬间画布仍是旧坐标系）。
+        /// </summary>
+        private bool _modeSwitching;
+
         /// <summary>当前展示模式。</summary>
         public PdfDisplayMode DisplayMode
         {
@@ -109,7 +115,15 @@ namespace PdfReader
 
             _composition.ConfigurePages((uint)session.PageCount, (uint)_currentPage, RenderPageForExportAsync);
 
-            await ApplyInitialDisplayAsync(cancellationToken).ConfigureAwait(false);
+            _modeSwitching = true;
+            try
+            {
+                await ApplyInitialDisplayAsync(cancellationToken).ConfigureAwait(false);
+            }
+            finally
+            {
+                _modeSwitching = false;
+            }
 
             await BeginPresentationAsync((int)session.PageCount, cancellationToken).ConfigureAwait(false);
         }
@@ -120,10 +134,35 @@ namespace PdfReader
             var view = _backgroundView;
             if (view == null) return;
 
+            // 重载文档时背景视图是新建的，内部模式仍为默认单页；先与当前模式对齐，
+            // 否则连续滚动下 Strip 保持折叠，ResetStrip 在 0 尺寸上布局，页面全空。
+            if (view.Mode != _displayMode)
+            {
+                if (view.Dispatcher.CheckAccess()) view.SetDisplayMode(_displayMode);
+                else await view.Dispatcher.InvokeAsync(() => view.SetDisplayMode(_displayMode));
+            }
+
             if (_displayMode == PdfDisplayMode.ContinuousScroll)
             {
                 await ResetStripAsync(cancellationToken).ConfigureAwait(false);
-                await ScrollToPageTopAsync(_currentPage, cancellationToken).ConfigureAwait(false);
+
+                // 长条的页面 Image 尺寸要到下一帧布局才真正就位（ActualWidth/Height 有效）。
+                // 此刻立即滚动/同步会拿到 0 尺寸矩形（stripH=0）→ 可见页为空、墨迹被清，
+                // 或落入宿主单页分支被误存到 _pluginCurrentPageIndex（「墨迹刷到第一页」）。
+                // 因此把「跳当前页顶部 + 按可见页归位墨迹」推迟到 Loaded 优先级布局完成后执行。
+                if (view.Dispatcher.CheckAccess())
+                {
+                    _ = view.Dispatcher.BeginInvoke(
+                        new Action(() => InitializeScrollDisplayAsync(view, cancellationToken)),
+                        System.Windows.Threading.DispatcherPriority.Loaded);
+                }
+                else
+                {
+                    await view.Dispatcher.InvokeAsync(() =>
+                        _ = view.Dispatcher.BeginInvoke(
+                            new Action(() => InitializeScrollDisplayAsync(view, cancellationToken)),
+                            System.Windows.Threading.DispatcherPriority.Loaded));
+                }
             }
             else
             {
@@ -140,26 +179,63 @@ namespace PdfReader
             }
         }
 
+        /// <summary>
+        /// 连续滚动模式的完整初始化：长条布局就绪后跳到当前页顶部，再按可见页归位墨迹。
+        /// 切换瞬间不实时平移墨迹（会把墨迹按整页高度甩出视口），而是跳到位后
+        /// 按滚动后的长条矩形整体重放（先按旧可见页保存，再按新位置恢复）。
+        /// </summary>
+        private async void InitializeScrollDisplayAsync(PdfBackgroundView view, CancellationToken cancellationToken)
+        {
+            if (view == null || !IsOpen || _displayMode != PdfDisplayMode.ContinuousScroll) return;
+
+            try
+            {
+                await ScrollToPageTopAsync(_currentPage, cancellationToken, jump: true).ConfigureAwait(false);
+                await SyncVisiblePagesAsync(cancellationToken).ConfigureAwait(false);
+            }
+            catch (OperationCanceledException)
+            {
+            }
+            catch (Exception ex)
+            {
+                _logError?.Invoke("连续滚动模式初始化失败", ex);
+            }
+        }
+
         /// <summary>切换展示模式，重排背景层并恢复墨迹。</summary>
         public async Task SetDisplayModeAsync(PdfDisplayMode mode, CancellationToken cancellationToken)
         {
+            _logError?.Invoke($"SetDisplayMode 请求={mode} 当前={_displayMode} IsOpen={IsOpen}", null);
             if (_displayMode == mode) return;
 
-            // 先记录新模式：即使文档未打开（IsOpen false）也要保存，
-            // 这样用户先选模式再打开 PDF 时，OpenAsync 能按所选模式初始化。
-            lock (_gate) { _displayMode = mode; }
-
             var view = _backgroundView;
-            if (view == null || !IsOpen) return;
+            if (view == null) return;
 
-            // 切换前先按旧模式保存当前画布墨迹到对应页，
-            // 否则宿主可见页矩形还没变，墨迹仍按旧坐标系，切到新模式后错位。
-            await SyncVisiblePagesAsync(cancellationToken).ConfigureAwait(false);
+            // 切换期间屏蔽无参可见页同步（SizeChanged/去抖触发），避免用中间态矩形误清画布墨迹。
+            _modeSwitching = true;
+            try
+            {
+                // 先按旧模式保存当前画布墨迹到对应页（此时 _displayMode 还是旧值，
+                // SyncVisiblePagesAsync 会用旧模式矩形正确保存），再切换模式。
+                if (IsOpen)
+                    await SyncVisiblePagesAsync(cancellationToken).ConfigureAwait(false);
 
-            if (view.Dispatcher.CheckAccess()) view.SetDisplayMode(mode);
-            else await view.Dispatcher.InvokeAsync(() => view.SetDisplayMode(mode));
+                // 记录新模式：即使文档未打开（IsOpen false）也要保存，
+                // 这样用户先选模式再打开 PDF 时，OpenAsync 能按所选模式初始化。
+                lock (_gate) { _displayMode = mode; }
 
-            await ApplyInitialDisplayAsync(cancellationToken).ConfigureAwait(false);
+                if (!IsOpen) return;
+
+                if (view.Dispatcher.CheckAccess()) view.SetDisplayMode(mode);
+                else await view.Dispatcher.InvokeAsync(() => view.SetDisplayMode(mode));
+
+                await ApplyInitialDisplayAsync(cancellationToken).ConfigureAwait(false);
+                _logError?.Invoke($"SetDisplayMode 完成={mode}", null);
+            }
+            finally
+            {
+                _modeSwitching = false;
+            }
         }
 
         /// <summary>重建长条：重置所有页占位并逐个渲染。</summary>
@@ -264,7 +340,7 @@ namespace PdfReader
         /// <summary>文档被关闭（含宿主强制结束演示源）时触发，供插件刷新 UI。</summary>
         public event Action Closed;
 
-        /// <summary>宿主翻页条触发的滚动到下一/上一页顶部。</summary>
+        /// <summary>宿主翻页条触发，与弹窗上/下一页一致：按当前模式分派。</summary>
         private async Task<int> HandleHostNavigationAsync(PresentationNavigation direction,
             CancellationToken cancellationToken)
         {
@@ -273,7 +349,11 @@ namespace PdfReader
             int target = CurrentPage + (direction == PresentationNavigation.Next ? 1 : -1);
             if (target < 0 || target >= PageCount) return 0;
 
-            await ScrollToPageTopAsync(target, cancellationToken).ConfigureAwait(false);
+            if (_displayMode == PdfDisplayMode.ContinuousScroll)
+                await ScrollToPageTopAsync(target, cancellationToken).ConfigureAwait(false);
+            else
+                await GoToPageAsync(target, cancellationToken).ConfigureAwait(false);
+
             return CurrentPage + 1;
         }
 
@@ -380,7 +460,6 @@ namespace PdfReader
                 // 翻页模式：滚轮翻页。双页按页对翻（+2 / -2），单页按 1。
                 int step = _displayMode == PdfDisplayMode.DoublePage ? 2 : 1;
                 int target = CurrentPage + (delta > 0 ? -step : step);
-                _logError?.Invoke($"滚轮翻页 模式={_displayMode} 当前页={CurrentPage} 目标页={target} delta={delta}", null);
                 _ = GoToPageAsync(target, CancellationToken.None);
             }
             return true;
@@ -444,7 +523,7 @@ namespace PdfReader
         }
 
         /// <summary>滚动到指定页顶部。</summary>
-        public async Task ScrollToPageTopAsync(int pageIndex, CancellationToken cancellationToken)
+        public async Task ScrollToPageTopAsync(int pageIndex, CancellationToken cancellationToken, bool jump = false)
         {
             var view = _backgroundView;
             if (view == null || !IsOpen) return;
@@ -474,32 +553,43 @@ namespace PdfReader
             double maxOffset = Math.Max(0, view.StripHeight - viewportH);
             double newOffset = Math.Max(0, Math.Min(pageTop, maxOffset));
 
-            await ScrollToOffsetAsync(newOffset, cancellationToken).ConfigureAwait(false);
+            await ScrollToOffsetAsync(newOffset, cancellationToken, jump).ConfigureAwait(false);
         }
 
         /// <summary>滚动到绝对偏移。</summary>
-        private async Task ScrollToOffsetAsync(double newOffset, CancellationToken cancellationToken)
+        private async Task ScrollToOffsetAsync(double newOffset, CancellationToken cancellationToken, bool jump = false)
         {
             var view = _backgroundView;
             if (view == null) return;
 
             double delta = newOffset - view.ScrollOffset;
-            if (Math.Abs(delta) < 0.5) return;
+            bool moved = Math.Abs(delta) >= 0.5;
 
-            if (view.Dispatcher.CheckAccess()) view.SetScrollOffset(newOffset);
-            else await view.Dispatcher.InvokeAsync(() => view.SetScrollOffset(newOffset));
+            if (moved)
+            {
+                if (view.Dispatcher.CheckAccess()) view.SetScrollOffset(newOffset);
+                else await view.Dispatcher.InvokeAsync(() => view.SetScrollOffset(newOffset));
 
-            try
-            {
-                await _composition.ScrollOffsetAsync(delta, cancellationToken).ConfigureAwait(false);
-            }
-            catch (Exception ex)
-            {
-                _logError?.Invoke("滚动墨迹跟随失败", ex);
+                // 实时平移墨迹仅在常规滚动时做。jump 为真表示模式切换/初始定位：
+                // 画布墨迹还是旧坐标系，平移会把它甩出视口，改为随后的
+                // SyncVisiblePagesAsync 按新长条矩形整体重放。
+                if (!jump)
+                {
+                    try
+                    {
+                        await _composition.ScrollOffsetAsync(delta, cancellationToken).ConfigureAwait(false);
+                    }
+                    catch (Exception ex)
+                    {
+                        _logError?.Invoke("滚动墨迹跟随失败", ex);
+                    }
+                }
             }
 
             UpdateCurrentPageFromScroll();
-            ScheduleSettleSync();
+            // 即使没实际滚动（首次切滚动 offset 已为目标值）也要调度墨迹同步，
+            // 否则切到滚动模式后画布墨迹不会按长条矩形恢复。jump 跳转由调用方显式同步。
+            if (!jump) ScheduleSettleSync();
         }
 
         /// <summary>根据滚动偏移计算视口顶部页，并通知页码变化。</summary>
@@ -526,6 +616,13 @@ namespace PdfReader
                 try { PageChanged?.Invoke(page); }
                 catch (Exception ex) { _logError?.Invoke("PDF 页码变化通知失败", ex); }
             }
+
+            // 同步宿主翻页条的页码：滚动模式翻页条/弹窗触发的滚动也要刷新。
+            if (_presentationActive)
+            {
+                try { _ = _presentation.UpdatePageAsync(_currentPage + 1); }
+                catch (Exception ex) { _logError?.Invoke("同步放映模式页码失败", ex); }
+            }
         }
 
         /// <summary>滚动停止去抖后重建可见页集合，让宿主把墨迹切分/恢复到位。</summary>
@@ -538,7 +635,9 @@ namespace PdfReader
 
             _ = Task.Delay(180, token).ContinueWith(t =>
             {
-                if (t.IsCanceled || !token.IsCancellationRequested) return;
+                // 180ms 内有新滚动：token 被取消、delay 未完成，跳过本次归位。
+                // 只有滚动真正停止 180ms 后才按可见页矩形归位墨迹。
+                if (t.IsCanceled) return;
                 SyncVisiblePagesAsync();
             }, token);
         }
@@ -546,8 +645,20 @@ namespace PdfReader
         /// <summary>把当前可见页集合提交给宿主（按模式取矩形，切分/恢复墨迹）。</summary>
         private void SyncVisiblePagesAsync()
         {
+            // 模式切换/重载进行中：画布墨迹仍是旧坐标系，用中间态矩形同步会误清画布。
+            // 切换流程结束时会显式同步一次，这里直接跳过。
+            if (_modeSwitching) return;
+
             var view = _backgroundView;
             if (view == null) return;
+
+            // ScheduleSettleSync 在去抖后从线程池回调，必须回到 UI 线程再访问 WPF 对象
+            //（Canvas.GetTop 等依赖属性），否则跨线程异常让滚动停止后的归位同步从未生效。
+            if (!view.Dispatcher.CheckAccess())
+            {
+                view.Dispatcher.BeginInvoke(new Action(SyncVisiblePagesAsync));
+                return;
+            }
 
             try
             {
@@ -556,6 +667,10 @@ namespace PdfReader
                     pages = view.GetStripVisiblePageRects(view.ActualHeight);
                 else
                     pages = view.GetPagerVisiblePageRects(CurrentPage);
+
+                // 诊断：确认滚动模式可见页同步是否被调用。
+                _logError?.Invoke($"SyncVisiblePages 模式={_displayMode} 页数={pages?.Count ?? -1} " +
+                    $"scrollOffset={view.ScrollOffset:F1} stripH={view.StripHeight:F1} viewH={view.ActualHeight:F1}", null);
 
                 if (pages == null || pages.Count == 0) return;
 
