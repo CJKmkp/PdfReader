@@ -3,114 +3,17 @@ name: Build
 on:
   push:
     branches: [ main ]
-    paths-ignore:
-      - '**.md'
-      - 'LICENSE'
+    paths-ignore: [ '**.md', 'LICENSE' ]
   pull_request:
     branches: [ main ]
-    paths-ignore:
-      - '**.md'
-      - 'LICENSE'
-  release:
-    types: [ published ]
+    paths-ignore: [ '**.md', 'LICENSE' ]
   workflow_dispatch:
 
 jobs:
   build:
-    runs-on: windows-latest
-
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Setup .NET
-        uses: actions/setup-dotnet@v4
-        with:
-          dotnet-version: '6.0.x'
-
-      # lib/ 下的宿主 SDK 引用必须已入库，否则这里会因找不到引用而失败。
-      - name: Verify SDK references
-        shell: pwsh
-        run: |
-          $required = @('lib/InkCanvas.PluginSdk.dll', 'lib/InkCanvas.Controls.dll')
-          foreach ($f in $required) {
-            if (-not (Test-Path $f)) {
-              throw "缺少编译所需的引用：$f（检查 .gitignore 的 *.dll 规则是否把它挡掉了）"
-            }
-          }
-          Write-Host "SDK 引用齐备。"
-
-      - name: Restore
-        run: dotnet restore PdfReader.csproj
-
-      - name: Build
-        run: dotnet build PdfReader.csproj -c Release -p:Platform=x64 --no-restore
-
-      - name: Verify output
-        shell: pwsh
-        run: |
-          $outDir = 'bin/x64/Release/net6.0-windows10.0.19041.0'
-          if (-not (Test-Path $outDir)) { $outDir = 'bin/Release/net6.0-windows10.0.19041.0' }
-          if (-not (Test-Path $outDir)) { throw "找不到构建输出目录。" }
-          "OUT_DIR=$outDir" | Out-File -FilePath $env:GITHUB_ENV -Append
-
-          foreach ($f in @('PdfReader.dll', 'PdfReader.deps.json')) {
-            if (-not (Test-Path (Join-Path $outDir $f))) { throw "缺少构建产物：$f" }
-          }
-
-          # 宿主已嵌入 WinRT 投影程序集，SDK/Controls 是 Private=False，
-          # 这些都不该出现在插件包里；出现即说明引用配置被改坏了。
-          $forbidden = @(
-            'WinRT.Runtime.dll',
-            'Microsoft.Windows.SDK.NET.dll',
-            'InkCanvas.PluginSdk.dll',
-            'InkCanvas.Controls.dll'
-          )
-          foreach ($f in $forbidden) {
-            if (Test-Path (Join-Path $outDir $f)) {
-              throw "输出目录出现不应分发的程序集：$f"
-            }
-          }
-          Write-Host "输出校验通过：$outDir"
-
-      - name: Package .icpx
-        shell: pwsh
-        run: |
-          $outDir = $env:OUT_DIR
-          $staging = Join-Path $env:RUNNER_TEMP 'pdfreader_pack'
-          if (Test-Path $staging) { Remove-Item $staging -Recurse -Force }
-          New-Item -ItemType Directory -Path $staging | Out-Null
-
-          Copy-Item 'manifest.json' $staging -Force
-          Copy-Item (Join-Path $outDir 'PdfReader.dll') $staging -Force
-          Copy-Item (Join-Path $outDir 'PdfReader.deps.json') $staging -Force
-
-          $icpx = Join-Path (Get-Location) 'com.icc.pdf-reader.icpx'
-          if (Test-Path $icpx) { Remove-Item $icpx -Force }
-          Add-Type -AssemblyName System.IO.Compression.FileSystem
-          [System.IO.Compression.ZipFile]::CreateFromDirectory($staging, $icpx)
-
-          # .icpx 必须只含这三个文件，多一个都可能被宿主插件校验拒绝。
-          $zip = [System.IO.Compression.ZipFile]::OpenRead($icpx)
-          try { $entries = $zip.Entries | ForEach-Object { $_.FullName } }
-          finally { $zip.Dispose() }
-
-          Write-Host "包内条目：$($entries -join ', ')"
-          $expected = @('manifest.json', 'PdfReader.dll', 'PdfReader.deps.json')
-          $unexpected = $entries | Where-Object { $_ -notin $expected }
-          if ($unexpected) { throw "包内出现意外条目：$($unexpected -join ', ')" }
-          $missing = $expected | Where-Object { $_ -notin $entries }
-          if ($missing) { throw "包内缺少条目：$($missing -join ', ')" }
-
-      - name: Upload artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: PdfReader-icpx
-          path: com.icc.pdf-reader.icpx
-          if-no-files-found: error
-
-      - name: Attach to release
-        if: github.event_name == 'release'
-        uses: softprops/action-gh-release@v2
-        with:
-          files: com.icc.pdf-reader.icpx
+    uses: InkCanvasForClass/community/.github/workflows/plugin-build.yml@net6
+    with:
+      project: PdfReader.csproj
+      plugin_id: com.icc.pdf-reader
+      create_release: false
+    secrets: inherit

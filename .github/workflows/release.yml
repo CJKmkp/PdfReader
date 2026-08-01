@@ -1,0 +1,23 @@
+name: Release
+
+on:
+  push:
+    tags: [ 'v*' ]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Release tag (e.g. v1.0.0)'
+        required: true
+        type: string
+
+jobs:
+  release:
+    uses: InkCanvasForClass/community/.github/workflows/plugin-build.yml@net6
+    with:
+      project: PdfReader.csproj
+      plugin_id: com.icc.pdf-reader
+      plugin_name: PDF 阅读器
+      plugin_description: '把 PDF 加载为画布背景，直接用宿主墨迹工具批注：翻页自动切换每页墨迹，可导出「页面 + 墨迹」为新的 PDF。渲染基于系统 Windows.Data.Pdf，无第三方依赖'
+      create_release: true
+      release_tag: ${{ inputs.tag || github.ref_name }}
+    secrets: inherit
