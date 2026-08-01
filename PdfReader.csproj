@@ -22,8 +22,8 @@
   </ItemGroup>
 
   <ItemGroup>
-    <PackageReference Include="InkCanvas.PluginSdk" Version="1.7.19.9-g9d061df0fc" PrivateAssets="all" />
-    <PackageReference Include="InkCanvas.Controls" Version="1.7.19.9-g9d061df0fc" PrivateAssets="all" />
+    <PackageReference Include="InkCanvas.PluginSdk" Version="1.7.19.9-g9d061df0fc" ExcludeAssets="runtime" />
+    <PackageReference Include="InkCanvas.Controls" Version="1.7.19.9-g9d061df0fc" ExcludeAssets="runtime" />
   </ItemGroup>
 
   <ItemGroup>
