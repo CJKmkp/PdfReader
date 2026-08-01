@@ -30,4 +30,11 @@
     <None Include="manifest.json" CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
 
+  <!-- WinRT.Runtime.dll / Microsoft.Windows.SDK.NET.dll 是 Windows 平台投影程序集，宿主进程必然已加载，
+       插件自带给宿主插件市场校验（CI）判为不应分发。构建后从输出目录移除。 -->
+  <Target Name="RemovePlatformAssemblies" AfterTargets="Build">
+    <Delete Files="$(OutputPath)WinRT.Runtime.dll" Condition="Exists('$(OutputPath)WinRT.Runtime.dll')" />
+    <Delete Files="$(OutputPath)Microsoft.Windows.SDK.NET.dll" Condition="Exists('$(OutputPath)Microsoft.Windows.SDK.NET.dll')" />
+  </Target>
+
 </Project>
