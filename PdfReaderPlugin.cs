@@ -183,6 +183,7 @@ namespace PdfReader
                     {
                         _session = new EmbeddedReaderSession(_composition, _presentation, _config, LogError);
                         _session.PageChanged += Session_PageChanged;
+                        _session.Closed += Session_Closed;
                     }
                     session = _session;
                 }
@@ -221,6 +222,12 @@ namespace PdfReader
             int total;
             lock (_gate) total = _session?.PageCount ?? 0;
             SetStatus(string.Format(Strings.PageOfFormat, pageIndex + 1, total));
+        }
+
+        /// <summary>会话被关闭（含宿主强制结束演示源）时刷新弹窗状态。</summary>
+        private void Session_Closed()
+        {
+            SetStatus(Strings.ClosedNotice);
         }
 
         internal async Task NextPageAsync()
@@ -426,6 +433,7 @@ namespace PdfReader
             if (session != null)
             {
                 try { session.PageChanged -= Session_PageChanged; } catch { }
+                try { session.Closed -= Session_Closed; } catch { }
                 try { session.Dispose(); } catch { }
             }
         }

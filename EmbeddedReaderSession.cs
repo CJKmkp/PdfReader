@@ -46,6 +46,9 @@ namespace PdfReader
         /// <summary>滚动停止去抖计时器状态。</summary>
         private CancellationTokenSource _scrollSettleCts;
 
+        /// <summary>正在翻页/滚动中，防止滚轮连发导致并发交错。</summary>
+        private int _navigating;
+
         /// <summary>当前展示模式。</summary>
         private PdfDisplayMode _displayMode = PdfDisplayMode.SinglePage;
 
@@ -141,10 +144,15 @@ namespace PdfReader
         public async Task SetDisplayModeAsync(PdfDisplayMode mode, CancellationToken cancellationToken)
         {
             if (_displayMode == mode) return;
-            lock (_gate) { _displayMode = mode; }
 
             var view = _backgroundView;
             if (view == null || !IsOpen) return;
+
+            // 切换前先按旧模式保存当前画布墨迹到对应页，
+            // 否则宿主可见页矩形还没变，墨迹仍按旧坐标系，切到新模式后错位。
+            await SyncVisiblePagesAsync(cancellationToken).ConfigureAwait(false);
+
+            lock (_gate) { _displayMode = mode; }
 
             if (view.Dispatcher.CheckAccess()) view.SetDisplayMode(mode);
             else await view.Dispatcher.InvokeAsync(() => view.SetDisplayMode(mode));
@@ -245,7 +253,14 @@ namespace PdfReader
             try { _presentation.Ended -= OnPresentationEnded; }
             catch { }
             Close();
+
+            // 通知插件刷新 UI（弹窗状态、页码等）。
+            try { Closed?.Invoke(); }
+            catch (Exception ex) { _logError?.Invoke("PDF 关闭通知失败", ex); }
         }
+
+        /// <summary>文档被关闭（含宿主强制结束演示源）时触发，供插件刷新 UI。</summary>
+        public event Action Closed;
 
         /// <summary>宿主翻页条触发的滚动到下一/上一页顶部。</summary>
         private async Task<int> HandleHostNavigationAsync(PresentationNavigation direction,
@@ -360,8 +375,10 @@ namespace PdfReader
             }
             else
             {
-                // 翻页模式：滚轮翻页（双页按页对）。
-                int target = CurrentPage + (delta > 0 ? -1 : 1);
+                // 翻页模式：滚轮翻页。双页按页对翻（+2 / -2），单页按 1。
+                int step = _displayMode == PdfDisplayMode.DoublePage ? 2 : 1;
+                int target = CurrentPage + (delta > 0 ? -step : step);
+                _logError?.Invoke($"滚轮翻页 模式={_displayMode} 当前页={CurrentPage} 目标页={target} delta={delta}", null);
                 _ = GoToPageAsync(target, CancellationToken.None);
             }
             return true;
@@ -433,15 +450,23 @@ namespace PdfReader
             int target = ClampPage(pageIndex, PageCount);
             double viewportH = view.ActualHeight;
 
+            // 长条可能尚未初始化（切到连续滚动模式但页还没渲染），此时 GetStripPageImage 返回 null。
             double pageTop;
             if (view.Dispatcher.CheckAccess())
             {
-                pageTop = Canvas.GetTop(view.GetStripPageImage(target));
+                var img = view.GetStripPageImage(target);
+                if (img == null) return;
+                pageTop = Canvas.GetTop(img);
             }
             else
             {
-                pageTop = await view.Dispatcher.InvokeAsync(
-                    () => Canvas.GetTop(view.GetStripPageImage(target))).Task;
+                pageTop = await view.Dispatcher.InvokeAsync(() =>
+                {
+                    var img = view.GetStripPageImage(target);
+                    if (img == null) return double.NaN;
+                    return Canvas.GetTop(img);
+                }).Task;
+                if (double.IsNaN(pageTop)) return;
             }
 
             double maxOffset = Math.Max(0, view.StripHeight - viewportH);
@@ -570,7 +595,10 @@ namespace PdfReader
             }
         }
 
-        /// <summary>翻页模式：翻到指定页（双页翻页对）。</summary>
+        /// <summary>翻页忙时暂存的最新目标页，当前翻页完成后继续翻。</summary>
+        private int _pendingPage = -1;
+
+        /// <summary>翻页模式：翻到指定页（双页翻页对）。快速连发时合并到最新目标页。</summary>
         public async Task GoToPageAsync(int pageIndex, CancellationToken cancellationToken)
         {
             if (_displayMode == PdfDisplayMode.ContinuousScroll)
@@ -579,6 +607,31 @@ namespace PdfReader
                 return;
             }
 
+            // 忙时暂存最新目标页，当前翻页完成后继续翻；避免滚轮连发事件被丢弃。
+            if (Interlocked.CompareExchange(ref _navigating, 1, 0) != 0)
+            {
+                Interlocked.Exchange(ref _pendingPage, pageIndex);
+                return;
+            }
+
+            try
+            {
+                int pending = pageIndex;
+                do
+                {
+                    await GoToPageCoreAsync(pending, cancellationToken).ConfigureAwait(false);
+                    pending = Interlocked.Exchange(ref _pendingPage, -1);
+                } while (pending >= 0);
+            }
+            finally
+            {
+                Interlocked.Exchange(ref _pendingPage, -1);
+                Interlocked.Exchange(ref _navigating, 0);
+            }
+        }
+
+        private async Task GoToPageCoreAsync(int pageIndex, CancellationToken cancellationToken)
+        {
             int total;
             lock (_gate)
             {
