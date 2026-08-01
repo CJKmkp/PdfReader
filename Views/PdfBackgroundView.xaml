@@ -5,41 +5,51 @@
              ClipToBounds="True">
     <!-- 三种展示模式共用一个背景层：
          1) 翻页容器（单页/双页）：单页 = 左列铺满；双页 = 左右并排
-         2) 滚动长条：所有页垂直排列，StripTransform.TranslateY 滚动 -->
+         2) 滚动长条：所有页垂直排列，StripTransform.TranslateY 滚动
+         ContentHost 是「页面内容」的缩放/平移容器：双指手势/Ctrl+滚轮缩放只作用在它上面，
+         根节点的深色画布背景保持铺满不动。宿主的墨迹换算锚点指向 ContentHost（见
+         SetCanvasContentAnchor），因此墨迹仍与缩放后的页面内容正确对齐。 -->
     <Grid Background="#FF1E1E1E" ClipToBounds="True">
-        <!-- 翻页容器：单/双页 -->
-        <Grid x:Name="Pager" Background="#FF1E1E1E" ClipToBounds="True">
-            <Grid.ColumnDefinitions>
-                <ColumnDefinition x:Name="LeftColumn" Width="*" />
-                <ColumnDefinition x:Name="RightColumn" Width="0" />
-            </Grid.ColumnDefinitions>
-            <Image x:Name="LeftImage" Grid.Column="0"
-                   Stretch="Uniform"
-                   HorizontalAlignment="Stretch" VerticalAlignment="Stretch"
-                   SnapsToDevicePixels="True"
-                   RenderOptions.BitmapScalingMode="HighQuality">
-                <Image.RenderTransform>
-                    <TranslateTransform x:Name="LeftTransform" />
-                </Image.RenderTransform>
-            </Image>
-            <Image x:Name="RightImage" Grid.Column="1"
-                   Stretch="Uniform"
-                   HorizontalAlignment="Stretch" VerticalAlignment="Stretch"
-                   SnapsToDevicePixels="True"
-                   RenderOptions.BitmapScalingMode="HighQuality"
-                   Visibility="Collapsed">
-                <Image.RenderTransform>
-                    <TranslateTransform x:Name="RightTransform" />
-                </Image.RenderTransform>
-            </Image>
-        </Grid>
+        <!-- 缩放/平移容器：只缩放 PDF 页面内容，不缩放深色画布背景 -->
+        <Grid x:Name="ContentHost" ClipToBounds="True">
+            <Grid.RenderTransform>
+                <MatrixTransform x:Name="ContentHostTransform" />
+            </Grid.RenderTransform>
 
-        <!-- 连续滚动长条 -->
-        <Canvas x:Name="Strip" Background="#FF1E1E1E" ClipToBounds="True"
-                Visibility="Collapsed">
-            <Canvas.RenderTransform>
-                <TranslateTransform x:Name="StripTransform" />
-            </Canvas.RenderTransform>
-        </Canvas>
+            <!-- 翻页容器：单/双页 -->
+            <Grid x:Name="Pager" Background="#FF1E1E1E" ClipToBounds="True">
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition x:Name="LeftColumn" Width="*" />
+                    <ColumnDefinition x:Name="RightColumn" Width="0" />
+                </Grid.ColumnDefinitions>
+                <Image x:Name="LeftImage" Grid.Column="0"
+                       Stretch="Uniform"
+                       HorizontalAlignment="Stretch" VerticalAlignment="Stretch"
+                       SnapsToDevicePixels="True"
+                       RenderOptions.BitmapScalingMode="HighQuality">
+                    <Image.RenderTransform>
+                        <TranslateTransform x:Name="LeftTransform" />
+                    </Image.RenderTransform>
+                </Image>
+                <Image x:Name="RightImage" Grid.Column="1"
+                       Stretch="Uniform"
+                       HorizontalAlignment="Stretch" VerticalAlignment="Stretch"
+                       SnapsToDevicePixels="True"
+                       RenderOptions.BitmapScalingMode="HighQuality"
+                       Visibility="Collapsed">
+                    <Image.RenderTransform>
+                        <TranslateTransform x:Name="RightTransform" />
+                    </Image.RenderTransform>
+                </Image>
+            </Grid>
+
+            <!-- 连续滚动长条 -->
+            <Canvas x:Name="Strip" Background="#FF1E1E1E" ClipToBounds="True"
+                    Visibility="Collapsed">
+                <Canvas.RenderTransform>
+                    <TranslateTransform x:Name="StripTransform" />
+                </Canvas.RenderTransform>
+            </Canvas>
+        </Grid>
     </Grid>
 </UserControl>

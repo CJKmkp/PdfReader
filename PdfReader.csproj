@@ -10,6 +10,9 @@
     <GenerateDocumentationFile>false</GenerateDocumentationFile>
     <DebugType>none</DebugType>
     <DebugSymbols>false</DebugSymbols>
+    <!-- 插件是独立分发到 Plugins/<id>/ 目录的，不能依赖宿主或 NuGet 全局缓存提供运行时依赖。
+         必须把引用的程序集（iNKORE 等）全部复制到输出目录，随插件一起部署。 -->
+    <CopyLocalLockFileAssemblies>true</CopyLocalLockFileAssemblies>
   </PropertyGroup>
 
   <ItemGroup>
@@ -19,8 +22,8 @@
   </ItemGroup>
 
   <ItemGroup>
-    <PackageReference Include="InkCanvas.PluginSdk" Version="1.7.19.9-ga6fafad8a9" PrivateAssets="all" />
-    <PackageReference Include="InkCanvas.Controls" Version="1.7.19.9-ga6fafad8a9" PrivateAssets="all" />
+    <PackageReference Include="InkCanvas.PluginSdk" Version="1.7.19.9-g9d061df0fc" PrivateAssets="all" />
+    <PackageReference Include="InkCanvas.Controls" Version="1.7.19.9-g9d061df0fc" PrivateAssets="all" />
   </ItemGroup>
 
   <ItemGroup>

@@ -19,17 +19,19 @@ if (-not (Test-Path $outDir)) {
     $outDir = Join-Path $root "bin\$Configuration\net6.0-windows10.0.19041.0"
 }
 
-$required = @("PdfReader.dll", "PdfReader.deps.json")
 $manifest = Join-Path $root "manifest.json"
 
 $staging = Join-Path $env:TEMP ("pdfreader_pack_" + [guid]::NewGuid().ToString("N"))
 New-Item -ItemType Directory -Path $staging | Out-Null
 try {
     Copy-Item $manifest (Join-Path $staging "manifest.json") -Force
-    foreach ($f in $required) {
-        $src = Join-Path $outDir $f
-        if (-not (Test-Path $src)) { throw "缺少构建产物：$src" }
-        Copy-Item $src (Join-Path $staging $f) -Force
+
+    # 插件自带全部运行时依赖（iNKORE 三件套、SDK、DI 等），随 .icpx 分发。
+    # 这些 DLL 由 CopyLocalLockFileAssemblies=true 复制到输出目录。
+    $runtimeFiles = Get-ChildItem $outDir -File | Where-Object { $_.Extension -in ".dll", ".deps.json" }
+    if (-not $runtimeFiles) { throw "输出目录没有可打包的 DLL：$outDir" }
+    foreach ($f in $runtimeFiles) {
+        Copy-Item $f.FullName (Join-Path $staging $f.Name) -Force
     }
 
     $icpx = Join-Path $root "com.icc.pdf-reader.icpx"

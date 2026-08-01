@@ -184,6 +184,7 @@ namespace PdfReader
                         _session = new EmbeddedReaderSession(_composition, _presentation, _config, LogError);
                         _session.PageChanged += Session_PageChanged;
                         _session.Closed += Session_Closed;
+                        _session.ViewTransformChanged += Session_ViewTransformChanged;
                     }
                     session = _session;
                 }
@@ -228,6 +229,28 @@ namespace PdfReader
         private void Session_Closed()
         {
             SetStatus(Strings.ClosedNotice);
+        }
+
+        /// <summary>视图矩阵（缩放/平移）变化时刷新弹窗的缩放百分比。</summary>
+        private void Session_ViewTransformChanged()
+        {
+            RefreshPopup();
+        }
+
+        /// <summary>当前视图缩放比例（1.0 = 100%）。</summary>
+        internal double ViewScale
+        {
+            get { lock (_gate) return _session?.ViewScale ?? 1.0; }
+        }
+
+        /// <summary>重置缩放回 100%，墨迹随之复位。</summary>
+        internal async Task ResetZoomAsync()
+        {
+            EmbeddedReaderSession session;
+            lock (_gate) session = _session;
+            if (session?.IsOpen != true) return;
+
+            await session.ResetZoomAsync().ConfigureAwait(false);
         }
 
         internal async Task NextPageAsync()
@@ -435,6 +458,7 @@ namespace PdfReader
             {
                 try { session.PageChanged -= Session_PageChanged; } catch { }
                 try { session.Closed -= Session_Closed; } catch { }
+                try { session.ViewTransformChanged -= Session_ViewTransformChanged; } catch { }
                 try { session.Dispose(); } catch { }
             }
         }

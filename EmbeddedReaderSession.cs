@@ -1,10 +1,12 @@
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Input;
+using System.Windows.Media;
 using System.Windows.Media.Imaging;
 using Ink_Canvas.Plugins;
 using PdfReader.Views;
@@ -15,8 +17,10 @@ namespace PdfReader
     /// 嵌入式 PDF 会话：把 PDF 作为连续滚动长条注入宿主画布下方，墨迹由宿主自己的 InkCanvas 承载。
     /// 滚动时背景层平移、宿主同步平移画布墨迹（实时跟随）；滚动停止后按视口内可见页切分/恢复墨迹。
     /// 导出交给宿主的 <see cref="ICanvasCompositionService.ExportWithInkAsync"/>。
+    /// 同时实现 <see cref="IPluginCanvasGestureHandler"/>：接管宿主转发的双指捏合缩放/平移，
+    /// 把缩放/平移作用于背景层视图矩阵，并实时同步画布墨迹。
     /// </summary>
-    internal sealed class EmbeddedReaderSession : IDisposable
+    internal sealed class EmbeddedReaderSession : IDisposable, IPluginCanvasGestureHandler
     {
         /// <summary>本插件在宿主放映模式里的演示源标识。</summary>
         private const string PresentationSourceId = "com.icc.pdf-reader";
@@ -58,11 +62,31 @@ namespace PdfReader
         /// </summary>
         private bool _modeSwitching;
 
+        /// <summary>
+        /// 视图矩阵（缩放/平移），与背景层根节点的 RenderTransform 一一对应。
+        /// 双指手势/滚轮缩放更新它后，通过 <see cref="PdfBackgroundView.SetViewMatrix"/> 应用到背景层，
+        /// 并用宿主 <see cref="ICanvasCompositionService.TransformInkAsync"/> 以同一增量矩阵实时变换墨迹。
+        /// 宿主对墨迹的按页存取自动包含该矩阵（TransformToVisual），因此墨迹始终锚定页面内容。
+        /// </summary>
+        private Matrix _viewMatrix = Matrix.Identity;
+
+        /// <summary>双指手势进行中；手势结束（<see cref="OnCanvasGestureCompleted"/>）时复位。</summary>
+        private bool _gestureActive;
+
         /// <summary>当前展示模式。</summary>
         public PdfDisplayMode DisplayMode
         {
             get { lock (_gate) return _displayMode; }
         }
+
+        /// <summary>当前视图缩放比例（矩阵 M11，均一缩放）。</summary>
+        internal double ViewScale
+        {
+            get { lock (_gate) return _viewMatrix.M11; }
+        }
+
+        /// <summary>视图矩阵（缩放/平移）变化时触发，供弹窗刷新缩放百分比显示。</summary>
+        public event Action ViewTransformChanged;
 
         public EmbeddedReaderSession(ICanvasCompositionService composition,
             IPresentationSourceService presentation, ReaderConfig config,
@@ -112,6 +136,7 @@ namespace PdfReader
             previous?.Dispose();
 
             EnsureBackgroundLayer();
+            _composition.SetCanvasGestureHandler(this);
 
             _composition.ConfigurePages((uint)session.PageCount, (uint)_currentPage, RenderPageForExportAsync);
 
@@ -389,6 +414,14 @@ namespace PdfReader
                 return created;
             });
             _backgroundView = created;
+
+            // 告诉宿主墨迹换算的目标是「内容层」（缩放/平移容器），而非固定背景根。
+            // 这样墨迹的按页存取自动包含内容层的缩放，缩放后翻页/切模式墨迹不错位。
+            if (created != null)
+            {
+                try { _composition.SetCanvasContentAnchor(created.ContentAnchor); }
+                catch (Exception ex) { _logError?.Invoke("设置 PDF 内容锚点失败", ex); }
+            }
         }
 
         private void BackgroundView_Loaded(object sender, RoutedEventArgs e)
@@ -439,6 +472,12 @@ namespace PdfReader
             if (local.X < 0 || local.Y < 0 || local.X > view.ActualWidth || local.Y > view.ActualHeight)
                 return;
 
+            // Ctrl+滚轮：以光标为锚缩放（给无触摸屏环境提供缩放入口，与 PDF 查看器惯例一致）。
+            if ((Keyboard.Modifiers & ModifierKeys.Control) != 0)
+            {
+                if (HandleZoom(e.Delta > 0, local)) { e.Handled = true; return; }
+            }
+
             if (HandleScroll(e.Delta)) e.Handled = true;
         }
 
@@ -465,6 +504,168 @@ namespace PdfReader
             return true;
         }
 
+        #region 双指手势与缩放
+
+        /// <summary>当前视图矩阵的缩放比例（均一缩放）。</summary>
+        private double CurrentScale => _viewMatrix.M11;
+
+        public bool OnCanvasGestureStarting(ManipulationStartingEventArgs e)
+        {
+            if (!IsOpen || _backgroundView == null) return false;
+            if ((e.Manipulators?.Count() ?? 0) < 2) return false;
+
+            // 只声明缩放 + 平移：双指捏合缩放 / 双指平移。不加旋转避免误旋转。
+            e.Mode = ManipulationModes.Scale | ManipulationModes.Translate;
+            _gestureActive = true;
+            return true;
+        }
+
+        public bool OnCanvasGestureDelta(ManipulationDeltaEventArgs e)
+        {
+            if (!IsOpen || _backgroundView == null) return false;
+            if ((e.Manipulators?.Count() ?? 0) < 2) return false;
+
+            try
+            {
+                var delta = e.DeltaManipulation;
+                double tx = delta.Translation.X;
+                double ty = delta.Translation.Y;
+                double factor = delta.Scale.Length > 0 ? (delta.Scale.X + delta.Scale.Y) / 2.0 : 1.0;
+
+                double oldScale = CurrentScale;
+                double newScale = Math.Max(ZoomModel.MinScale, Math.Min(ZoomModel.MaxScale, oldScale * factor));
+                double ratio = newScale / oldScale;
+
+                if (Math.Abs(tx) < 0.001 && Math.Abs(ty) < 0.001 && Math.Abs(ratio - 1.0) < 0.0001)
+                    return true;
+
+                // 增量矩阵 = 以手势中心为锚缩放 + 平移，作用于画布坐标。
+                Point origin = e.ManipulationOrigin;
+                var inc = new Matrix();
+                inc.ScaleAt(ratio, ratio, origin.X, origin.Y);
+                inc.Translate(tx, ty);
+
+                ApplyViewTransform(inc);
+                return true;
+            }
+            catch (Exception ex)
+            {
+                _logError?.Invoke("PDF 双指手势处理失败", ex);
+                return true;
+            }
+        }
+
+        public void OnCanvasGestureCompleted(ManipulationCompletedEventArgs e)
+        {
+            if (!_gestureActive) return;
+            _gestureActive = false;
+
+            // 手势期间墨迹已用同一增量矩阵实时跟随；结束时按最终视图矩阵把墨迹重放归位到各页。
+            SyncVisiblePagesAsync();
+            RaiseViewTransformChanged();
+        }
+
+        /// <summary>应用增量矩阵：更新视图矩阵、同步墨迹，并调度滚动停止归位。</summary>
+        private void ApplyViewTransform(Matrix inc)
+        {
+            var view = _backgroundView;
+            if (view == null) return;
+
+            _viewMatrix = _viewMatrix * inc;
+
+            if (view.Dispatcher.CheckAccess()) view.SetViewMatrix(_viewMatrix);
+            else view.Dispatcher.Invoke(() => view.SetViewMatrix(_viewMatrix));
+
+            // 墨迹实时跟随（同一增量矩阵，画布坐标）。手势事件在 UI 线程回调，
+            // 宿主的 TransformInkAsync 在 UI 线程内联执行，因此按增量即时生效。
+            try
+            {
+                _ = _composition.TransformInkAsync(inc, CancellationToken.None)
+                    .ContinueWith(t =>
+                    {
+                        if (t.IsFaulted) _logError?.Invoke("双指手势墨迹跟随失败", t.Exception);
+                    }, TaskContinuationOptions.OnlyOnFaulted);
+            }
+            catch (Exception ex)
+            {
+                _logError?.Invoke("双指手势墨迹跟随失败", ex);
+            }
+
+            // 手势期间不重分页（避免频繁清/填画布），结束后去抖一次按最终矩阵归位。
+            ScheduleSettleSync();
+            RaiseViewTransformChanged();
+        }
+
+        /// <summary>
+        /// 缩放感知的墨迹跟随：缩放后同样的滚动增量对应更大的画布位移（×当前缩放比例）。
+        /// 仍走宿主 <see cref="ICanvasCompositionService.ScrollOffsetAsync"/>，宿主记账
+        /// 在每次可见页同步时归零，因此缩放前后一致，无需宿主感知缩放本身。
+        /// </summary>
+        private Task ScrollInkFollowAsync(double actualDelta, CancellationToken cancellationToken = default)
+        {
+            double s = CurrentScale;
+            return _composition.ScrollOffsetAsync(actualDelta * s, cancellationToken);
+        }
+
+        /// <summary>Ctrl+滚轮缩放：以光标（背景层局部坐标）为锚步进缩放。</summary>
+        private bool HandleZoom(bool zoomIn, Point anchorInView)
+        {
+            if (!IsOpen) return false;
+
+            double oldScale = CurrentScale;
+            double target = zoomIn ? ZoomModel.StepUp(oldScale) : ZoomModel.StepDown(oldScale);
+            if (Math.Abs(target - oldScale) < 1e-9) return false;
+            double ratio = target / oldScale;
+
+            // 光标在背景层局部坐标；缩放锚点须换算到画布坐标（与墨迹/视图矩阵同一坐标系）。
+            Point anchor = _viewMatrix.Transform(anchorInView);
+
+            var inc = new Matrix();
+            inc.ScaleAt(ratio, ratio, anchor.X, anchor.Y);
+
+            ApplyViewTransform(inc);
+            return true;
+        }
+
+        /// <summary>重置缩放：视图矩阵归零，墨迹按逆矩阵复位，再按页重放。</summary>
+        internal async Task ResetZoomAsync()
+        {
+            if (_viewMatrix.IsIdentity) return;
+
+            Matrix inverse = _viewMatrix;
+            if (inverse.HasInverse) inverse.Invert();
+            else inverse = Matrix.Identity;
+
+            _viewMatrix = Matrix.Identity;
+
+            var view = _backgroundView;
+            if (view != null)
+            {
+                if (view.Dispatcher.CheckAccess()) view.SetViewMatrix(_viewMatrix);
+                else await view.Dispatcher.InvokeAsync(() => view.SetViewMatrix(_viewMatrix)).Task;
+            }
+
+            try
+            {
+                await _composition.TransformInkAsync(inverse, CancellationToken.None).ConfigureAwait(false);
+            }
+            catch (Exception ex)
+            {
+                _logError?.Invoke("重置缩放墨迹失败", ex);
+            }
+
+            await SyncVisiblePagesAsync(CancellationToken.None).ConfigureAwait(false);
+            RaiseViewTransformChanged();
+        }
+
+        private void RaiseViewTransformChanged()
+        {
+            try { ViewTransformChanged?.Invoke(); }
+            catch (Exception ex) { _logError?.Invoke("视图变换通知失败", ex); }
+        }
+
+        #endregion
+
         /// <summary>按增量滚动，墨迹实时跟随。</summary>
         public async Task ScrollByAsync(double deltaY)
         {
@@ -473,7 +674,8 @@ namespace PdfReader
             var view = _backgroundView;
             if (view == null) return;
 
-            double viewportH = view.ActualHeight;
+            // 缩放后视口内可见的局部高度变小（缩放 s 后只看到 1/s 的内容），滚动边界随之缩小。
+            double viewportH = view.EffectiveViewportHeight;
             double maxOffset = Math.Max(0, view.StripHeight - viewportH);
 
             // 计算新偏移并夹取边界。
@@ -487,10 +689,10 @@ namespace PdfReader
             if (view.Dispatcher.CheckAccess()) view.SetScrollOffset(newOffset);
             else await view.Dispatcher.InvokeAsync(() => view.SetScrollOffset(newOffset));
 
-            // 2. 宿主实时平移墨迹。
+            // 2. 宿主实时平移墨迹（缩放感知：缩放后同样的滚动增量对应更大的画布位移）。
             try
             {
-                await _composition.ScrollOffsetAsync(actualDelta, CancellationToken.None).ConfigureAwait(false);
+                await ScrollInkFollowAsync(actualDelta).ConfigureAwait(false);
             }
             catch (Exception ex)
             {
@@ -529,7 +731,7 @@ namespace PdfReader
             if (view == null || !IsOpen) return;
 
             int target = ClampPage(pageIndex, PageCount);
-            double viewportH = view.ActualHeight;
+            double viewportH = view.EffectiveViewportHeight;
 
             // 长条可能尚未初始化（切到连续滚动模式但页还没渲染），此时 GetStripPageImage 返回 null。
             double pageTop;
@@ -577,7 +779,7 @@ namespace PdfReader
                 {
                     try
                     {
-                        await _composition.ScrollOffsetAsync(delta, cancellationToken).ConfigureAwait(false);
+                        await ScrollInkFollowAsync(delta, cancellationToken).ConfigureAwait(false);
                     }
                     catch (Exception ex)
                     {
@@ -598,8 +800,9 @@ namespace PdfReader
             var view = _backgroundView;
             if (view == null) return;
 
-            double offset = view.ScrollOffset;
-            double viewportH = view.ActualHeight;
+            // 缩放围绕非原点锚点时会引入视图矩阵平移，视口顶边对应的长条内容偏移
+            // 偏离 ScrollOffset，需按矩阵修正。
+            double offset = view.GetViewportTopScrollOffset();
 
             // 找视口顶部覆盖的页。
             int topPage = 0;
@@ -664,7 +867,7 @@ namespace PdfReader
             {
                 IReadOnlyList<PluginVisiblePage> pages;
                 if (_displayMode == PdfDisplayMode.ContinuousScroll)
-                    pages = view.GetStripVisiblePageRects(view.ActualHeight);
+                    pages = view.GetStripVisiblePageRects();
                 else
                     pages = view.GetPagerVisiblePageRects(CurrentPage);
 
@@ -693,8 +896,8 @@ namespace PdfReader
                 IReadOnlyList<PluginVisiblePage> pages;
                 if (_displayMode == PdfDisplayMode.ContinuousScroll)
                 {
-                    if (view.Dispatcher.CheckAccess()) pages = view.GetStripVisiblePageRects(view.ActualHeight);
-                    else pages = await view.Dispatcher.InvokeAsync(() => view.GetStripVisiblePageRects(view.ActualHeight)).Task;
+                    if (view.Dispatcher.CheckAccess()) pages = view.GetStripVisiblePageRects();
+                    else pages = await view.Dispatcher.InvokeAsync(view.GetStripVisiblePageRects).Task;
                 }
                 else
                 {
@@ -917,6 +1120,12 @@ namespace PdfReader
                 }
                 catch { }
             }
+
+            try { _composition.SetCanvasGestureHandler(null); }
+            catch (Exception ex) { _logError?.Invoke("注销 PDF 画布手势处理器失败", ex); }
+
+            try { _composition.SetCanvasContentAnchor(null); }
+            catch (Exception ex) { _logError?.Invoke("清除 PDF 内容锚点失败", ex); }
 
             try { _composition.RemoveBackgroundLayer(); }
             catch (Exception ex) { _logError?.Invoke("移除 PDF 背景层失败", ex); }

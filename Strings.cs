@@ -28,6 +28,8 @@ namespace PdfReader
         public static string DoublePage => IsEnglish ? "Two pages" : "双页";
         public static string SinglePage => IsEnglish ? "Single page" : "单页";
         public static string ContinuousScroll => IsEnglish ? "Continuous" : "连续滚动";
+        public static string ResetZoom => IsEnglish ? "Reset zoom" : "重置缩放";
+        public static string ZoomFormat => IsEnglish ? "Zoom: {0}%" : "缩放：{0}%";
 
         // 状态与提示
         public static string Loading => IsEnglish ? "Loading…" : "正在加载…";
@@ -98,11 +100,11 @@ namespace PdfReader
         public static string SettingsCacheBudget => IsEnglish ? "Page cache budget (MB)" : "页面缓存上限（MB）";
         public static string SettingsShortcutsHeader => IsEnglish ? "Usage" : "使用说明";
         public static string SettingsShortcuts => IsEnglish
-            ? "Click the toolbar PDF button to open a document.\nUse the popup's page buttons or the mouse wheel to turn pages; ink is saved per page automatically.\nExport writes the whole document, from the first page to the last."
-            : "点击工具栏「PDF」按钮打开文档。\n用弹窗里的翻页按钮或鼠标滚轮翻页，墨迹按页自动保存。\n导出会写出完整文档，从第一页到最后一页。";
+            ? "Click the toolbar PDF button to open a document.\nUse the popup's page buttons or the mouse wheel to turn pages; ink is saved per page automatically.\nPinch with two fingers, or hold Ctrl and scroll the mouse wheel, to zoom the page; drag with two fingers to pan.\nExport writes the whole document, from the first page to the last."
+            : "点击工具栏「PDF」按钮打开文档。\n用弹窗里的翻页按钮或鼠标滚轮翻页，墨迹按页自动保存。\n双指捏合或按住 Ctrl + 滚轮可缩放页面，双指拖动可平移；缩放后可点弹窗里的「重置缩放」复原。\n导出会写出完整文档，从第一页到最后一页。";
         public static string SettingsNotesHeader => IsEnglish ? "Notes" : "注意事项";
         public static string SettingsNotes => IsEnglish
-            ? "• The PDF sits below the host ink canvas, so all existing pen tools work on it.\n• Turning pages swaps the ink: each page keeps its own strokes.\n• Encrypted PDFs are not supported.\n• A higher render scale looks sharper but uses more memory."
-            : "• PDF 位于宿主墨迹画布下方，因此所有既有笔工具都能直接用。\n• 翻页会切换墨迹：每页各自保留自己的笔迹。\n• 不支持加密 PDF。\n• 渲染倍率越高越清晰，但内存占用也越大。";
+            ? "• The PDF sits below the host ink canvas, so all existing pen tools work on it.\n• Turning pages swaps the ink: each page keeps its own strokes.\n• Zoom keeps the ink glued to the page; the reset button restores 100%.\n• Encrypted PDFs are not supported.\n• A higher render scale looks sharper but uses more memory."
+            : "• PDF 位于宿主墨迹画布下方，因此所有既有笔工具都能直接用。\n• 翻页会切换墨迹：每页各自保留自己的笔迹。\n• 缩放时墨迹始终贴合页面，重置按钮可恢复到 100%。\n• 不支持加密 PDF。\n• 渲染倍率越高越清晰，但内存占用也越大。";
     }
 }

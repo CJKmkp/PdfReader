@@ -47,6 +47,13 @@ namespace PdfReader.Views
         /// <summary>当前滚动偏移（DIP）。</summary>
         private double _scrollOffset;
 
+        /// <summary>
+        /// 视图矩阵（缩放/平移），作用于整个背景层（含长条与翻页容器）。
+        /// 宿主通过 <c>inkCanvas.TransformToVisual(本视图)</c> 把该矩阵自动纳入墨迹换算，
+        /// 因此墨迹的按页保存/恢复天然对齐缩放后的页面，无需在矩形上同步。
+        /// </summary>
+        private Matrix _viewMatrix = Matrix.Identity;
+
         /// <summary>当前展示模式。</summary>
         private PdfDisplayMode _mode = PdfDisplayMode.SinglePage;
 
@@ -75,6 +82,46 @@ namespace PdfReader.Views
 
         /// <summary>长条总高度（含页间空白带）。</summary>
         public double StripHeight { get; private set; }
+
+        /// <summary>缩放后的可见视口高度（背景层局部坐标）。用于滚动边界与可见页判定。</summary>
+        public double EffectiveViewportHeight
+        {
+            get
+            {
+                double s = _viewMatrix.M11;
+                return ActualHeight / (s > 0 && !double.IsNaN(s) && !double.IsInfinity(s) ? s : 1.0);
+            }
+        }
+
+        /// <summary>
+        /// 设置视图矩阵（缩放/平移）并应用到「页面内容」容器（<see cref="ContentHost"/>）。
+        /// 根节点的深色画布背景保持铺满不动；宿主的墨迹换算锚点指向 <see cref="ContentHost"/>
+        /// （见 <see cref="ContentAnchor"/>），因此墨迹仍与缩放后的页面内容正确对齐。
+        /// </summary>
+        public void SetViewMatrix(Matrix matrix)
+        {
+            _viewMatrix = matrix;
+            // 矩阵已显式编码缩放锚点，ContentHostTransform 的 CenterX/CenterY 保持默认 (0,0)。
+            ContentHostTransform.Matrix = matrix;
+        }
+
+        /// <summary>
+        /// 内容锚点：承载页面内容、会被缩放/平移的容器。宿主墨迹换算
+        /// （inkCanvas.TransformToVisual 该锚点）会自动纳入它的缩放/平移变换。
+        /// </summary>
+        public FrameworkElement ContentAnchor => ContentHost;
+
+        /// <summary>
+        /// 视口顶边对应的长条滚动偏移（含视图矩阵平移修正）。
+        /// 缩放围绕非原点锚点时，视图矩阵含平移分量，视口顶边对应的内容位置会偏离
+        /// <see cref="ScrollOffset"/>，当前页判定需要据此修正。
+        /// </summary>
+        public double GetViewportTopScrollOffset()
+        {
+            double s = _viewMatrix.M11;
+            if (s <= 0 || double.IsNaN(s) || double.IsInfinity(s)) return _scrollOffset;
+            return _scrollOffset - _viewMatrix.OffsetY / s;
+        }
 
         #region 模式切换
 
@@ -305,14 +352,25 @@ namespace PdfReader.Views
         }
 
         /// <summary>
-        /// 长条模式下视口内可见页矩形（画布坐标：长条坐标减去滚动偏移）。
+        /// 长条模式下视口内可见页矩形（背景层局部坐标，已含滚动偏移）。
         /// 宿主用它在画布坐标系裁剪/恢复墨迹，因此必须与墨迹坐标系一致。
+        /// 可见窗口由视口映射回背景局部坐标得出，缩放/平移后的视图矩阵会改变该窗口，
+        /// 据此判定哪些页真正在视口内（缩放后可见范围缩小、平移后窗口偏移）。
         /// </summary>
-        public IReadOnlyList<PluginVisiblePage> GetStripVisiblePageRects(double viewportHeight)
+        public IReadOnlyList<PluginVisiblePage> GetStripVisiblePageRects()
         {
             var list = new List<PluginVisiblePage>();
             double viewW = ActualWidth;
-            if (viewW <= 0 || viewportHeight <= 0) return list;
+            double viewH = ActualHeight;
+            if (viewW <= 0 || viewH <= 0) return list;
+
+            double s = _viewMatrix.M11;
+            if (s <= 0 || double.IsNaN(s) || double.IsInfinity(s)) s = 1.0;
+
+            // 画布视口 [0, viewH] 经视图矩阵逆映射回背景局部坐标的可见窗口。
+            // OffsetY 是缩放锚点平移产生的分量：锚点不在原点时，缩放也会移动窗口。
+            double winTop = -_viewMatrix.OffsetY / s;
+            double winBottom = winTop + viewH / s;
 
             for (int i = 0; i < _pageImages.Count; i++)
             {
@@ -322,7 +380,7 @@ namespace PdfReader.Views
                 double pageTop = Canvas.GetTop(img) - _scrollOffset;
                 double pageBottom = pageTop + h;
 
-                if (pageBottom > 0 && pageTop < viewportHeight)
+                if (pageBottom > winTop && pageTop < winBottom)
                 {
                     list.Add(new PluginVisiblePage
                     {

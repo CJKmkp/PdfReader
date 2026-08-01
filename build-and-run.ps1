@@ -29,6 +29,7 @@ $pluginDest = Join-Path $HostDir "Plugins\com.icc.pdf-reader"
 if (-not (Test-Path $pluginDest)) { New-Item -ItemType Directory -Path $pluginDest -Force | Out-Null }
 
 Copy-Item (Join-Path $root "manifest.json") $pluginDest -Force
-Copy-Item (Join-Path $outDir "PdfReader.dll") $pluginDest -Force
-Copy-Item (Join-Path $outDir "PdfReader.deps.json") $pluginDest -Force
+# 插件自带全部运行时依赖（iNKORE 等），随输出目录一起部署。
+Get-ChildItem $outDir -File | Where-Object { $_.Extension -in ".dll", ".deps.json" } |
+    Copy-Item -Destination $pluginDest -Force
 Write-Host "已复制到：$pluginDest"

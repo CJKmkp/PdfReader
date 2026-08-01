@@ -30,6 +30,14 @@
                           SelectionChanged="DisplayModeCombo_SelectionChanged" />
 
                 <ikw:SimpleStackPanel Orientation="Horizontal" Spacing="6" HorizontalAlignment="Center">
+                    <TextBlock x:Name="ZoomText" VerticalAlignment="Center" MinWidth="76"
+                               TextAlignment="Center" FontSize="12"
+                               Foreground="{DynamicResource FloatingBarForegroundBrush}" />
+                    <Button x:Name="ResetZoomButton" Padding="10,4" MinWidth="88"
+                            Click="ResetZoomButton_Click" />
+                </ikw:SimpleStackPanel>
+
+                <ikw:SimpleStackPanel Orientation="Horizontal" Spacing="6" HorizontalAlignment="Center">
                     <Button x:Name="OpenButton" Padding="10,4" MinWidth="72" Click="OpenButton_Click" />
                     <Button x:Name="ExportButton" Padding="10,4" MinWidth="104" Click="ExportButton_Click" />
                     <Button x:Name="CloseButton" Padding="10,4" MinWidth="88" Click="CloseButton_Click" />

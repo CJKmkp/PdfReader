@@ -5,7 +5,7 @@ using System.Windows.Controls;
 namespace PdfReader.Views
 {
     /// <summary>
-    /// 工具栏按钮的弹窗内容：打开 / 翻页 / 导出 / 关闭。
+    /// 工具栏按钮的弹窗内容：打开 / 翻页 / 导出 / 缩放 / 关闭。
     /// 所有文案在代码里从 <see cref="Strings"/> 赋值，XAML 不含硬编码文本。
     /// </summary>
     public partial class ReaderPopupContent : UserControl
@@ -36,6 +36,7 @@ namespace PdfReader.Views
             NextButton.Content = Strings.NextPage;
             ExportButton.Content = Strings.Export;
             CloseButton.Content = Strings.Close;
+            ResetZoomButton.Content = Strings.ResetZoom;
 
             DisplayModeCombo.Items.Clear();
             DisplayModeCombo.Items.Add(new ComboBoxItem { Content = Strings.SinglePage, Tag = PdfDisplayMode.SinglePage });
@@ -52,6 +53,10 @@ namespace PdfReader.Views
 
             PageText.Text = open ? string.Format(Strings.PageOfFormat, page + 1, total) : "—";
             StatusText.Text = _plugin?.StatusText ?? string.Empty;
+
+            double scale = _plugin?.ViewScale ?? 1.0;
+            ZoomText.Text = open ? string.Format(Strings.ZoomFormat, (int)Math.Round(scale * 100)) : "—";
+            ResetZoomButton.IsEnabled = open && Math.Abs(scale - 1.0) > 0.001;
 
             PreviousButton.IsEnabled = open && page > 0;
             NextButton.IsEnabled = open && page < total - 1;
@@ -96,6 +101,11 @@ namespace PdfReader.Views
         private async void NextButton_Click(object sender, RoutedEventArgs e)
         {
             await SafeRun(() => _plugin.NextPageAsync());
+        }
+
+        private async void ResetZoomButton_Click(object sender, RoutedEventArgs e)
+        {
+            await SafeRun(() => _plugin.ResetZoomAsync());
         }
 
         private async void ExportButton_Click(object sender, RoutedEventArgs e)
