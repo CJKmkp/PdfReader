@@ -56,6 +56,9 @@ namespace PdfReader
 
         /// <summary>白板工具栏按钮承载的弹窗（关闭 PDF 时一并收起）。</summary>
         private System.Windows.Controls.Primitives.Popup _boardPopup;
+
+        /// <summary>白板弹窗的独立内容实例（与浮动弹窗的 _popup 隔离，避免两个 Popup 争用同一内容）。</summary>
+        private ReaderPopupContent _boardPopupContent;
         private SettingsView _settingsView;
         private ReaderPopupContent _popup;
         private string _statusText = string.Empty;
@@ -203,15 +206,17 @@ namespace PdfReader
                         };
                         _boardPopup = popup;
 
-                        // 弹窗内容与浮动栏共用同一份（_popup）；标题栏关闭按钮在浮动栏由宿主接线，
-                        // 这里自己接一份，让板工具栏弹窗也能用标题栏 X 收起。
+                        // 板弹窗用自己的内容实例，与浮动弹窗的 _popup 隔离：
+                        // 共享实例会被两个 Popup 争用（reparent），且关闭按钮的 Tag 防重接线会互相冲突。
+                        var popupContent = new ReaderPopupContent(this);
+                        _boardPopupContent = popupContent;
+
+                        // 标题栏 X 接线：宿主经验是弹窗未打开时嵌套 Shell 的视觉树可能不完整，
+                        // 因此创建时接一次、Opened 后再补接一次（与宿主 ToolbarRegistry 同款做法）。
                         try
                         {
-                            if (item.PopupContentFactory?.Invoke() is ReaderPopupContent popupView
-                                && popupView.Shell?.CloseButtonControl != null)
-                            {
-                                popupView.Shell.CloseButtonControl.Click += (_, __) => popup.IsOpen = false;
-                            }
+                            WireBoardPopupCloseButton(popupContent, popup);
+                            popup.Opened += (s, e) => WireBoardPopupCloseButton(popupContent, popup);
                         }
                         catch { }
 
@@ -223,8 +228,7 @@ namespace PdfReader
                             }
                             else
                             {
-                                try { popup.Child = item.PopupContentFactory?.Invoke(); }
-                                catch { }
+                                popup.Child = popupContent;
                                 popup.IsOpen = true;
                             }
                         };
@@ -236,6 +240,23 @@ namespace PdfReader
             {
                 LogError("注册白板工具栏 PDF 组件失败（宿主 SDK 可能较旧）", ex);
             }
+        }
+
+        /// <summary>
+        /// 把弹窗内容里 PopupShellContent 的标题栏关闭按钮接到 popup 收起。
+        /// 用 Tag 记录已接线的 popup，避免 Opened 补接时重复订阅。
+        /// </summary>
+        private static void WireBoardPopupCloseButton(ReaderPopupContent popupContent,
+            System.Windows.Controls.Primitives.Popup popup)
+        {
+            if (popupContent == null || popup == null) return;
+
+            var closeButton = popupContent.Shell?.CloseButtonControl;
+            if (closeButton == null) return;
+            if (ReferenceEquals(closeButton.Tag, popup)) return;
+
+            closeButton.Tag = popup;
+            closeButton.Click += (_, __) => popup.IsOpen = false;
         }
 
         /// <summary>
@@ -602,6 +623,17 @@ namespace PdfReader
             {
                 if (popup.Dispatcher.CheckAccess()) popup.RefreshState();
                 else popup.Dispatcher.BeginInvoke(new Action(popup.RefreshState));
+            }
+            catch { }
+
+            // 白板弹窗是独立实例，同样要同步页码/按钮可用状态。
+            var boardPopup = _boardPopupContent;
+            if (boardPopup == null || ReferenceEquals(boardPopup, popup)) return;
+
+            try
+            {
+                if (boardPopup.Dispatcher.CheckAccess()) boardPopup.RefreshState();
+                else boardPopup.Dispatcher.BeginInvoke(new Action(boardPopup.RefreshState));
             }
             catch { }
         }
