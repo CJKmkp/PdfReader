@@ -519,9 +519,13 @@ namespace PdfReader
                 return;
 
             // Ctrl+滚轮：以光标为锚缩放（给无触摸屏环境提供缩放入口，与 PDF 查看器惯例一致）。
+            // 到最大/最小缩放档时 HandleZoom 返回 false（没有档位可进），此时也要吞掉事件，
+            // 否则会落到下面的翻页/滚动逻辑，变成「Ctrl+滚轮在极限时翻页」。
             if ((Keyboard.Modifiers & ModifierKeys.Control) != 0)
             {
                 if (HandleZoom(e.Delta > 0, local)) { e.Handled = true; return; }
+                e.Handled = true;
+                return;
             }
 
             if (HandleScroll(e.Delta)) e.Handled = true;
