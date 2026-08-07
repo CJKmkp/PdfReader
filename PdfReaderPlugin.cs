@@ -40,6 +40,7 @@ namespace PdfReader
         private IPresentationSourceService _presentation;
 
         private INotificationService _notificationService;
+        private IEventService _eventService;
         private EmbeddedReaderSession _session;
         private SettingsView _settingsView;
         private ReaderPopupContent _popup;
@@ -75,6 +76,16 @@ namespace PdfReader
             {
                 _presentation = null;
                 Log("宿主未提供演示源服务，PDF 将不进入放映模式（滚轮翻页与弹窗控制仍可用）。");
+            }
+
+            // 订阅白板模式切换：进入白板时隐藏 PDF 背景，退出时恢复（见 OnWhiteboardModeChanged）。
+            try { _eventService = GetService<IEventService>(); }
+            catch { _eventService = null; }
+
+            if (_eventService != null)
+            {
+                try { _eventService.WhiteboardModeChanged += OnWhiteboardModeChanged; }
+                catch { _eventService = null; }
             }
 
             RegisterToolbarButton(host);
@@ -119,6 +130,87 @@ namespace PdfReader
             };
 
             host.RegisterToolbarItem(item);
+            RegisterBoardToolbarItem(host, item, iconGeometry);
+        }
+
+        /// <summary>
+        /// 向白板工具栏注册同款 PDF 组件：白板模式下浮动栏隐藏，用户仍能从板工具栏打开 PDF 弹窗。
+        /// 宿主板工具栏的插件包装器（PluginBoardToolbarItemWrapper）不接 PopupContentFactory，
+        /// 因此这里自建一个承载同一份弹窗内容的 Popup，点击按钮开合。
+        /// 宿主 SDK 较旧（无 RegisterBoardToolbarItem）时静默跳过，不影响浮动栏功能。
+        /// </summary>
+        private void RegisterBoardToolbarItem(IPluginHost host, PluginToolbarItemInfo item, Geometry iconGeometry)
+        {
+            try
+            {
+                host.RegisterBoardToolbarItem(new PluginToolbarItemInfo
+                {
+                    Id = item.Id,
+                    DisplayName = item.DisplayName,
+                    Description = item.Description,
+                    IconGeometry = item.IconGeometry,
+                    PopupContentFactory = item.PopupContentFactory,
+                    ViewFactory = () =>
+                    {
+                        var button = new ToolbarImageButton { Label = Strings.ToolbarButton };
+                        try
+                        {
+                            button.Icon.Geometry = iconGeometry ?? Geometry.Parse(FallbackIconGeometry);
+                            button.SetResourceReference(ToolbarImageButton.IconBrushProperty, "IconForeground");
+                        }
+                        catch { }
+                        NudgeIconAndLabel(button);
+
+                        // 板工具栏的插件弹窗由插件自己承载：定位在按钮上方，点击按钮开合。
+                        var popup = new System.Windows.Controls.Primitives.Popup
+                        {
+                            AllowsTransparency = true,
+                            StaysOpen = true,
+                            Focusable = true,
+                            IsOpen = false,
+                            PlacementTarget = button,
+                            Placement = System.Windows.Controls.Primitives.PlacementMode.Custom
+                        };
+                        popup.CustomPopupPlacementCallback = (popupSize, targetSize, offset) => new[]
+                        {
+                            new System.Windows.Controls.Primitives.CustomPopupPlacement(
+                                new Point(targetSize.Width / 2 - popupSize.Width / 2, -popupSize.Height - 8),
+                                System.Windows.Controls.Primitives.PopupPrimaryAxis.Vertical)
+                        };
+
+                        // 弹窗内容与浮动栏共用同一份（_popup）；标题栏关闭按钮在浮动栏由宿主接线，
+                        // 这里自己接一份，让板工具栏弹窗也能用标题栏 X 收起。
+                        try
+                        {
+                            if (item.PopupContentFactory?.Invoke() is ReaderPopupContent popupView
+                                && popupView.Shell?.CloseButtonControl != null)
+                            {
+                                popupView.Shell.CloseButtonControl.Click += (_, __) => popup.IsOpen = false;
+                            }
+                        }
+                        catch { }
+
+                        button.ButtonMouseUp += (s, e) =>
+                        {
+                            if (popup.IsOpen)
+                            {
+                                popup.IsOpen = false;
+                            }
+                            else
+                            {
+                                try { popup.Child = item.PopupContentFactory?.Invoke(); }
+                                catch { }
+                                popup.IsOpen = true;
+                            }
+                        };
+                        return button;
+                    }
+                });
+            }
+            catch (Exception ex)
+            {
+                LogError("注册白板工具栏 PDF 组件失败（宿主 SDK 可能较旧）", ex);
+            }
         }
 
         /// <summary>
@@ -481,6 +573,11 @@ namespace PdfReader
 
         public override void Shutdown()
         {
+            if (_eventService != null)
+            {
+                try { _eventService.WhiteboardModeChanged -= OnWhiteboardModeChanged; }
+                catch { }
+            }
             DisposeSession();
             SaveConfig();
             Log($"{Name} 已关闭");
