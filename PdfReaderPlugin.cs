@@ -1,6 +1,7 @@
 using System;
 using System.Globalization;
 using System.IO;
+using System.Reflection;
 using System.Threading;
 using System.Threading.Tasks;
 using System.Windows;
@@ -101,6 +102,7 @@ namespace PdfReader
                         button.SetResourceReference(ToolbarImageButton.IconBrushProperty, "IconForeground");
                     }
                     catch { }
+                    NudgeIconAndLabel(button);
                     return button;
                 },
                 ApplyOrientation = (view, orientation) =>
@@ -117,6 +119,30 @@ namespace PdfReader
             };
 
             host.RegisterToolbarItem(item);
+        }
+
+        /// <summary>
+        /// 只对 PDF 按钮生效的微调：把图标与文字标签整体下移 1px、右移 1px。
+        /// <see cref="ToolbarImageButton"/> 是宿主共享控件，改它的 Margin 会影响所有浮动栏按钮；
+        /// 这里通过反射拿内部元素并加 <see cref="TranslateTransform"/>，只移动当前按钮的图标与文字。
+        /// 用 RenderTransform 而不是 Margin，是因为宿主切换紧凑模式时会重置 Margin、不会动 RenderTransform。
+        /// </summary>
+        private static void NudgeIconAndLabel(ToolbarImageButton button)
+        {
+            try
+            {
+                const double shiftX = 1.0;
+                const double shiftY = 1.0;
+                var type = button.GetType();
+                if (type.GetField("ButtonImage", BindingFlags.NonPublic | BindingFlags.Instance)?.GetValue(button) is Image image)
+                    image.RenderTransform = new TranslateTransform(shiftX, shiftY);
+                if (type.GetField("LabelTextBlock", BindingFlags.NonPublic | BindingFlags.Instance)?.GetValue(button) is TextBlock label)
+                    label.RenderTransform = new TranslateTransform(shiftX, shiftY);
+            }
+            catch
+            {
+                // 宿主控件内部结构变化时静默跳过：仅该按钮不获得偏移，不影响其它功能。
+            }
         }
 
         #region 供弹窗与设置页调用
