@@ -315,26 +315,32 @@ namespace PdfReader
             else view.Dispatcher.Invoke(() => view.SetStripPageSource(pageIndex, bitmap));
         }
 
-        /// <summary>进入宿主放映模式。</summary>
+        /// <summary>
+        /// 进入宿主放映模式。重新打开文档时，BeginAsync 会先结束旧注册并触发 Ended（EndAsyncCore），
+        /// 若不退订，OnPresentationEnded 会把刚打开的新文档 Close 掉——因此与
+        /// <see cref="ReplayPresentationAsync"/> 一样采用「退订 → Begin → 重订」。
+        /// </summary>
         private async Task BeginPresentationAsync(int pageCount, CancellationToken cancellationToken)
         {
             if (_presentation == null || pageCount <= 0) return;
 
+            try { _presentation.Ended -= OnPresentationEnded; }
+            catch { }
+
             try
             {
-                await _presentation.BeginAsync(CreatePresentationDescriptor(pageCount), cancellationToken)
+                bool ok = await _presentation.BeginAsync(CreatePresentationDescriptor(pageCount), cancellationToken)
                     .ConfigureAwait(false);
-
-                if (_presentation.IsActive)
-                {
-                    _presentationActive = true;
-                    try { _presentation.Ended += OnPresentationEnded; }
-                    catch { }
-                }
+                _presentationActive = ok && _presentation.IsActive;
             }
             catch (Exception ex)
             {
                 _logError?.Invoke("进入放映模式失败", ex);
+            }
+            finally
+            {
+                try { _presentation.Ended += OnPresentationEnded; }
+                catch { }
             }
         }
 

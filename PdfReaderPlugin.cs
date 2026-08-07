@@ -41,7 +41,21 @@ namespace PdfReader
 
         private INotificationService _notificationService;
         private IEventService _eventService;
+        private IWindowService _windowService;
+        private ICanvasInkService _canvasInkService;
         private EmbeddedReaderSession _session;
+
+        /// <summary>当前是否处于白板模式（由 WhiteboardModeChanged 事件维护）。</summary>
+        private bool _isWhiteboardMode;
+
+        /// <summary>本次 PDF 是从白板里打开的：关闭后要回到白板。</summary>
+        private bool _openedFromWhiteboard;
+
+        /// <summary>打开流程中我们自己退出白板的标志，避免误清 _openedFromWhiteboard。</summary>
+        private bool _exitingWhiteboardForOpen;
+
+        /// <summary>白板工具栏按钮承载的弹窗（关闭 PDF 时一并收起）。</summary>
+        private System.Windows.Controls.Primitives.Popup _boardPopup;
         private SettingsView _settingsView;
         private ReaderPopupContent _popup;
         private string _statusText = string.Empty;
@@ -88,6 +102,17 @@ namespace PdfReader
                 catch { _eventService = null; }
             }
 
+            // 白板与 PDF 互操作（打开前退出白板、关闭后回到白板）需要的服务。
+            try { _canvasInkService = GetService<ICanvasInkService>(); }
+            catch { _canvasInkService = null; }
+
+            try
+            {
+                _windowService = GetService<IWindowService>();
+                _isWhiteboardMode = _windowService?.IsWhiteboardMode ?? false;
+            }
+            catch { _windowService = null; }
+
             RegisterToolbarButton(host);
             Log("工具栏组件「" + Strings.PluginName + "」已注册。");
         }
@@ -130,7 +155,7 @@ namespace PdfReader
             };
 
             host.RegisterToolbarItem(item);
-            RegisterBoardToolbarItem(host, item, iconGeometry);
+            RegisterBoardToolbarItem(host, item, iconMarkup);
         }
 
         /// <summary>
@@ -139,7 +164,7 @@ namespace PdfReader
         /// 因此这里自建一个承载同一份弹窗内容的 Popup，点击按钮开合。
         /// 宿主 SDK 较旧（无 RegisterBoardToolbarItem）时静默跳过，不影响浮动栏功能。
         /// </summary>
-        private void RegisterBoardToolbarItem(IPluginHost host, PluginToolbarItemInfo item, Geometry iconGeometry)
+        private void RegisterBoardToolbarItem(IPluginHost host, PluginToolbarItemInfo item, string iconMarkup)
         {
             try
             {
@@ -152,14 +177,13 @@ namespace PdfReader
                     PopupContentFactory = item.PopupContentFactory,
                     ViewFactory = () =>
                     {
-                        var button = new ToolbarImageButton { Label = Strings.ToolbarButton };
-                        try
+                        // 用宿主自己的板工具栏按钮（BoardToolbarButton）：图标 20×20、文字 12 号、
+                        // 无按压阴影，与宿主其它白板组件外观一致（浮动栏按钮是 24×24 + 13 号 + 按压反馈）。
+                        var button = new BoardToolbarButton
                         {
-                            button.Icon.Geometry = iconGeometry ?? Geometry.Parse(FallbackIconGeometry);
-                            button.SetResourceReference(ToolbarImageButton.IconBrushProperty, "IconForeground");
-                        }
-                        catch { }
-                        NudgeIconAndLabel(button);
+                            Label = Strings.ToolbarButton,
+                            IconGeometry = iconMarkup ?? FallbackIconGeometry
+                        };
 
                         // 板工具栏的插件弹窗由插件自己承载：定位在按钮上方，点击按钮开合。
                         var popup = new System.Windows.Controls.Primitives.Popup
@@ -177,6 +201,7 @@ namespace PdfReader
                                 new Point(targetSize.Width / 2 - popupSize.Width / 2, -popupSize.Height - 8),
                                 System.Windows.Controls.Primitives.PopupPrimaryAxis.Vertical)
                         };
+                        _boardPopup = popup;
 
                         // 弹窗内容与浮动栏共用同一份（_popup）；标题栏关闭按钮在浮动栏由宿主接线，
                         // 这里自己接一份，让板工具栏弹窗也能用标题栏 X 收起。
@@ -284,6 +309,18 @@ namespace PdfReader
             };
 
             if (dialog.ShowDialog() != true) return;
+
+            // 白板模式下打开 PDF：先退出白板，让 PDF 正常成为画布背景；
+            // 关闭 PDF 后由 AfterPdfClosed 回到白板。
+            if (_isWhiteboardMode && _canvasInkService != null)
+            {
+                _exitingWhiteboardForOpen = true;
+                try { _canvasInkService.ExitWhiteboard(); }
+                catch (Exception ex) { LogError("打开 PDF 前退出白板失败", ex); }
+                finally { _exitingWhiteboardForOpen = false; }
+                _openedFromWhiteboard = true;
+            }
+
             await OpenDocumentAsync(dialog.FileName, 0).ConfigureAwait(false);
         }
 
@@ -347,6 +384,26 @@ namespace PdfReader
         private void Session_Closed()
         {
             SetStatus(Strings.ClosedNotice);
+            AfterPdfClosed();
+        }
+
+        /// <summary>PDF 关闭/放映结束后的收尾：收起板工具栏弹窗；从白板打开的则回到白板。</summary>
+        private void AfterPdfClosed()
+        {
+            try
+            {
+                if (_boardPopup != null) _boardPopup.IsOpen = false;
+            }
+            catch { }
+
+            if (!_openedFromWhiteboard) return;
+            _openedFromWhiteboard = false;
+
+            // 已在白板（用户中途手动进入）就不重复切换：宿主的 EnterWhiteboard 是取反切换。
+            if (_windowService == null || _isWhiteboardMode) return;
+
+            try { _windowService.EnterWhiteboard(); }
+            catch (Exception ex) { LogError("关闭 PDF 后回到白板失败", ex); }
         }
 
         /// <summary>
@@ -356,6 +413,12 @@ namespace PdfReader
         /// </summary>
         private void OnWhiteboardModeChanged(bool isWhiteboardMode)
         {
+            _isWhiteboardMode = isWhiteboardMode;
+
+            // 用户手动退出白板（非打开 PDF 触发的退出）：关闭 PDF 后不再自动回白板。
+            if (!isWhiteboardMode && !_exitingWhiteboardForOpen)
+                _openedFromWhiteboard = false;
+
             EmbeddedReaderSession session;
             lock (_gate) session = _session;
             if (session == null || !session.IsOpen) return;
@@ -482,6 +545,7 @@ namespace PdfReader
 
             session.Close();
             SetStatus(Strings.ClosedNotice);
+            AfterPdfClosed();
         }
 
         internal void SaveConfig()
