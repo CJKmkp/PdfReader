@@ -9,6 +9,23 @@ namespace PdfReader
         Custom = 2
     }
 
+    /// <summary>渲染质量档位：决定每页位图的渲染倍率。</summary>
+    internal enum RenderQualityMode
+    {
+        /// <summary>性能：固定 2.0 倍（现状水平）。</summary>
+        Performance,
+
+        /// <summary>均衡：固定 3.0 倍。</summary>
+        Balanced,
+
+        /// <summary>
+        /// 质量：按视口计算到最大缩放（<see cref="MaxScale"/>，8×）下吃满显示密度，
+        /// 上限放宽到 <see cref="QualityMaxPixelDimension"/> / <see cref="QualityMaxPixelCount"/>
+        /// （常规屏幕与常见页面可完全覆盖，极端页面/极端屏仍由上限约束）。
+        /// </summary>
+        Quality
+    }
+
     /// <summary>
     /// 缩放计算与渲染像素宽度推导。纯逻辑，不依赖 WPF 之外的东西，便于单独验证边界值。
     /// </summary>
@@ -25,6 +42,12 @@ namespace PdfReader
 
         /// <summary>单张位图的最大总像素数（40 MP，约 160MB BGRA）。</summary>
         public const long MaxPixelCount = 40L * 1000 * 1000;
+
+        /// <summary>质量档单张位图的最大边长（像素）。仅质量档使用，放宽以覆盖最大缩放。</summary>
+        public const int QualityMaxPixelDimension = 16384;
+
+        /// <summary>质量档单张位图的最大总像素数（320 MP，约 1.28GB BGRA）。仅质量档使用，绝对安全上限。</summary>
+        public const long QualityMaxPixelCount = 320L * 1000 * 1000;
 
         /// <summary>渲染宽度按此粒度取整，避免连续缩放时每一像素都产生新的缓存条目。</summary>
         public const int WidthBucket = 64;
@@ -104,24 +127,46 @@ namespace PdfReader
 
             double raw = pageWidth * Clamp(scale) * dpiScale;
             if (raw < 1) raw = 1;
+            return ApplyRenderCaps(raw, pageWidth, pageHeight, MaxPixelDimension, MaxPixelCount);
+        }
 
+        /// <summary>
+        /// 质量档专用：按「目标显示密度」（显示像素 / 页面点）直接计算渲染宽度。
+        /// 不走 <see cref="ComputeRenderWidth"/> 是因为其内部 Clamp 把倍率钳在
+        /// <see cref="MaxScale"/>（8×）以内，而质量档密度 = 视口适配 × 最大缩放可能超过 8×。
+        /// 只受 <see cref="QualityMaxPixelDimension"/> / <see cref="QualityMaxPixelCount"/> 上限约束。
+        /// </summary>
+        public static int ComputeQualityRenderWidth(double density, double pageWidth, double pageHeight)
+        {
+            if (pageWidth <= 0 || pageHeight <= 0) return WidthBucket;
+            if (density <= 0 || double.IsNaN(density) || double.IsInfinity(density)) density = 3.0;
+
+            double raw = pageWidth * density;
+            if (raw < 1) raw = 1;
+            return ApplyRenderCaps(raw, pageWidth, pageHeight, QualityMaxPixelDimension, QualityMaxPixelCount);
+        }
+
+        /// <summary>对原始像素宽度应用「向上取整到桶边界 + 单边/总量上限」。</summary>
+        private static int ApplyRenderCaps(double raw, double pageWidth, double pageHeight,
+            int maxPixelDimension, long maxPixelCount)
+        {
             // 向上取整到桶边界，保证渲染分辨率不低于显示分辨率
             int width = (int)Math.Ceiling(raw / WidthBucket) * WidthBucket;
 
             // 边长上限
             double aspect = pageHeight / pageWidth;
-            if (width > MaxPixelDimension) width = MaxPixelDimension;
+            if (width > maxPixelDimension) width = maxPixelDimension;
             int height = (int)Math.Ceiling(width * aspect);
-            if (height > MaxPixelDimension)
+            if (height > maxPixelDimension)
             {
-                width = (int)Math.Floor(MaxPixelDimension / aspect);
-                height = MaxPixelDimension;
+                width = (int)Math.Floor(maxPixelDimension / aspect);
+                height = maxPixelDimension;
             }
 
             // 总像素上限
-            if ((long)width * height > MaxPixelCount)
+            if ((long)width * height > maxPixelCount)
             {
-                width = (int)Math.Floor(Math.Sqrt(MaxPixelCount / aspect));
+                width = (int)Math.Floor(Math.Sqrt(maxPixelCount / aspect));
             }
 
             if (width < 1) width = 1;

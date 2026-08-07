@@ -440,6 +440,27 @@ namespace PdfReader
             catch (Exception ex) { LogError("关闭 PDF 后回到白板失败", ex); }
         }
 
+        /// <summary>渲染质量档位变化：保存配置并让会话清缓存、按新档位重渲染当前视图。</summary>
+        internal void SetRenderQuality(RenderQualityMode mode)
+        {
+            // 质量档内存占用大，用宿主通知提示一次（风格与宿主一致）。
+            if (mode == RenderQualityMode.Quality)
+                Notify(Strings.QualityWarning, NotificationLevel.Warning);
+
+            if (_config != null)
+            {
+                _config.RenderQuality = mode;
+                SaveConfig();
+            }
+
+            EmbeddedReaderSession session;
+            lock (_gate) session = _session;
+            if (session == null) return;
+
+            try { _ = session.ReloadRenderQualityAsync(); }
+            catch (Exception ex) { LogError("按新渲染质量重渲染失败", ex); }
+        }
+
         /// <summary>笔/鼠标模式切换（true=笔类，false=鼠标）：同步给会话，控制单指平移是否接管。</summary>
         private void OnPenModeChanged(bool isPenMode)
         {

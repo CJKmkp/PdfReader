@@ -56,6 +56,15 @@ namespace PdfReader
         /// <summary>当前展示模式。</summary>
         private PdfDisplayMode _displayMode = PdfDisplayMode.SinglePage;
 
+        /// <summary>背景层视口尺寸（UI 线程 SizeChanged 维护；质量档位据此算渲染倍率）。</summary>
+        private Size _viewportSize;
+
+        /// <summary>显示器 DPI 缩放（UI 线程维护；质量档密度按物理像素计算，否则高 DPI 屏上位图被拉伸变软）。</summary>
+        private double _dpiScale = 1.0;
+
+        /// <summary>当前页最近一次渲染的宽度桶（质量档缩放跟随重渲染用）。</summary>
+        private int _currentPageWidthBucket = -1;
+
         /// <summary>
         /// 展示模式切换/文档重载进行中：屏蔽 SizeChanged/去抖触发的无参可见页同步，
         /// 避免用中间态矩形误清画布墨迹（切换瞬间画布仍是旧坐标系）。
@@ -479,7 +488,14 @@ namespace PdfReader
 
         private void BackgroundView_SizeChanged(object sender, SizeChangedEventArgs e)
         {
-            if (sender is PdfBackgroundView view) SyncVisiblePagesAsync();
+            if (sender is PdfBackgroundView view)
+            {
+                // UI 线程维护视口尺寸与 DPI；渲染线程（质量档位算倍率）只读，双 double 读安全。
+                _viewportSize = e.NewSize;
+                try { _dpiScale = VisualTreeHelper.GetDpi(view).DpiScaleX; }
+                catch { }
+                SyncVisiblePagesAsync();
+            }
         }
 
         private void AttachWheelHandler(PdfBackgroundView view)
@@ -930,6 +946,40 @@ namespace PdfReader
             }
         }
 
+        /// <summary>
+        /// 质量档（翻页模式）：当前页的渲染密度与显示密度相差超过一个桶时，
+        /// 按当前显示密度重渲染当前页——接近矢量的逐级光栅化，与主流 PDF 浏览器一致。
+        /// 用 _navigating 与翻页互斥：渲染期间用户翻页会先暂存，渲染完成后继续。
+        /// </summary>
+        private async Task MaybeReRenderForZoomAsync()
+        {
+            if (_config.RenderQuality != RenderQualityMode.Quality) return;
+            if (_displayMode == PdfDisplayMode.ContinuousScroll) return;
+            if (!IsOpen || _backgroundView == null) return;
+
+            PdfDocumentSession document;
+            lock (_gate) document = _document;
+            if (document == null) return;
+
+            int page = CurrentPage;
+            int width = ComputeRenderWidth(document, page);
+            int bucket = width / ZoomModel.WidthBucket;
+            if (bucket == _currentPageWidthBucket) return;
+
+            // 抢到 _navigating 才开始；翻页进行中跳过（翻页自身已按当前密度渲染）。
+            if (Interlocked.CompareExchange(ref _navigating, 1, 0) != 0) return;
+            try
+            {
+                if (bucket == _currentPageWidthBucket) return;
+                _currentPageWidthBucket = bucket;
+                await RenderCurrentPageAsync(CancellationToken.None).ConfigureAwait(false);
+            }
+            finally
+            {
+                Interlocked.Exchange(ref _navigating, 0);
+            }
+        }
+
         /// <summary>滚动停止去抖后重建可见页集合，让宿主把墨迹切分/恢复到位。</summary>
         private void ScheduleSettleSync()
         {
@@ -965,6 +1015,9 @@ namespace PdfReader
                 return;
             }
 
+            // 质量档（翻页模式）：缩放停止/重置后按当前显示密度重渲染当前页。
+            _ = MaybeReRenderForZoomAsync();
+
             try
             {
                 IReadOnlyList<PluginVisiblePage> pages;
@@ -992,6 +1045,9 @@ namespace PdfReader
         {
             var view = _backgroundView;
             if (view == null) return;
+
+            // 质量档：重置缩放等路径也会走到这里，同样触发按当前密度重渲染。
+            _ = MaybeReRenderForZoomAsync();
 
             try
             {
@@ -1150,7 +1206,7 @@ namespace PdfReader
         private Task<BitmapSource> RenderPageForExportAsync(uint pageIndex, CancellationToken cancellationToken)
             => RenderPageAsync((int)pageIndex, cancellationToken);
 
-        /// <summary>按页面物理尺寸与配置倍率计算渲染宽度。</summary>
+        /// <summary>按页面物理尺寸与质量档位计算渲染宽度。</summary>
         private int ComputeRenderWidth(PdfDocumentSession document, int pageIndex)
         {
             double pageWidth;
@@ -1167,7 +1223,45 @@ namespace PdfReader
                 pageHeight = 792;
             }
 
-            return ZoomModel.ComputeRenderWidth(_config.NormalizedRenderScale, pageWidth, pageHeight, 1.0);
+            if (_config.RenderQuality == RenderQualityMode.Quality)
+            {
+                // 质量档：目标密度 = 视口适配 × 显示倍率 × DPI（物理像素）。
+                // 翻页模式跟随当前缩放逐级光栅化（见 MaybeReRenderForZoomAsync，接近矢量）；
+                // 连续滚动长条固定按最大缩放密度渲染，缩放时不再整体重渲。
+                double viewW = _viewportSize.Width;
+                double viewH = _viewportSize.Height;
+                double density = 3.0;
+                if (viewW > 0 && viewH > 0 && pageWidth > 0 && pageHeight > 0)
+                {
+                    double fit = Math.Min(viewW / pageWidth, viewH / pageHeight);
+                    if (fit > 0 && !double.IsInfinity(fit))
+                    {
+                        double zoom = _displayMode == PdfDisplayMode.ContinuousScroll
+                            ? ZoomModel.MaxScale
+                            : Math.Min(Math.Max(CurrentScale, 0.1), ZoomModel.MaxScale);
+                        density = Math.Max(3.0, fit * zoom * _dpiScale);
+                    }
+                }
+                return ZoomModel.ComputeQualityRenderWidth(density, pageWidth, pageHeight);
+            }
+
+            // 性能 = 固定 2.0（现状）；均衡 = 固定 3.0。
+            double factor = _config.RenderQuality == RenderQualityMode.Performance ? 2.0 : 3.0;
+            return ZoomModel.ComputeRenderWidth(factor, pageWidth, pageHeight, 1.0);
+        }
+
+        /// <summary>质量档位变化后：清缓存并按新档位重渲染当前视图（滚动模式重建长条）。</summary>
+        internal async Task ReloadRenderQualityAsync()
+        {
+            lock (_gate) { _cache?.Clear(); }
+            if (!IsOpen) return;
+
+            if (_displayMode == PdfDisplayMode.ContinuousScroll)
+                await ResetStripAsync(CancellationToken.None).ConfigureAwait(false);
+            else
+                await RenderCurrentPageAsync(CancellationToken.None).ConfigureAwait(false);
+
+            await SyncVisiblePagesAsync(CancellationToken.None).ConfigureAwait(false);
         }
 
         /// <summary>把「背景 + 墨迹」导出为新的 PDF：完整文档，从第一页到末页。</summary>

@@ -27,6 +27,10 @@
                 <ComboBox x:Name="DisplayModeCombo" MinWidth="140" HorizontalAlignment="Center"
                           SelectionChanged="DisplayModeCombo_SelectionChanged" />
 
+                <!-- 渲染质量：性能 / 均衡 / 质量 -->
+                <ComboBox x:Name="QualityCombo" MinWidth="140" HorizontalAlignment="Center"
+                          SelectionChanged="QualityCombo_SelectionChanged" />
+
                 <ikw:SimpleStackPanel Orientation="Horizontal" Spacing="6" HorizontalAlignment="Center">
                     <TextBlock x:Name="ZoomText" VerticalAlignment="Center" MinWidth="76"
                                TextAlignment="Center" FontSize="12"
