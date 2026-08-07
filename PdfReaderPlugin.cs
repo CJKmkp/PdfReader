@@ -48,6 +48,9 @@ namespace PdfReader
         /// <summary>当前是否处于白板模式（由 WhiteboardModeChanged 事件维护）。</summary>
         private bool _isWhiteboardMode;
 
+        /// <summary>当前是否笔类模式（笔/荧光笔/橡皮/选择）；false = 纯鼠标模式。默认按笔处理更安全。</summary>
+        private bool _isPenMode = true;
+
         /// <summary>本次 PDF 是从白板里打开的：关闭后要回到白板。</summary>
         private bool _openedFromWhiteboard;
 
@@ -103,6 +106,13 @@ namespace PdfReader
             {
                 try { _eventService.WhiteboardModeChanged += OnWhiteboardModeChanged; }
                 catch { _eventService = null; }
+
+                if (_eventService != null)
+                {
+                    // 笔/鼠标模式：控制鼠标模式下单指平移是否接管（见 OnPenModeChanged）。
+                    try { _eventService.PenModeChanged += OnPenModeChanged; }
+                    catch { }
+                }
             }
 
             // 白板与 PDF 互操作（打开前退出白板、关闭后回到白板）需要的服务。
@@ -367,6 +377,9 @@ namespace PdfReader
 
                 await session.OpenAsync(path, initialPage, CancellationToken.None).ConfigureAwait(false);
 
+                // 打开 PDF 后自动开启双指缩放/移动：把当前的笔模式同步给会话（单指平移门控用）。
+                session.IsPenMode = _isPenMode;
+
                 _config.LastDocumentPath = path;
                 _config.LastPageIndex = session.CurrentPage;
                 SaveConfig();
@@ -425,6 +438,17 @@ namespace PdfReader
 
             try { _windowService.EnterWhiteboard(); }
             catch (Exception ex) { LogError("关闭 PDF 后回到白板失败", ex); }
+        }
+
+        /// <summary>笔/鼠标模式切换（true=笔类，false=鼠标）：同步给会话，控制单指平移是否接管。</summary>
+        private void OnPenModeChanged(bool isPenMode)
+        {
+            _isPenMode = isPenMode;
+
+            EmbeddedReaderSession session;
+            lock (_gate) session = _session;
+            if (session == null) return;
+            session.IsPenMode = isPenMode;
         }
 
         /// <summary>
@@ -672,6 +696,8 @@ namespace PdfReader
             if (_eventService != null)
             {
                 try { _eventService.WhiteboardModeChanged -= OnWhiteboardModeChanged; }
+                catch { }
+                try { _eventService.PenModeChanged -= OnPenModeChanged; }
                 catch { }
             }
             DisposeSession();

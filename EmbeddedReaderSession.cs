@@ -562,10 +562,41 @@ namespace PdfReader
         /// <summary>当前视图矩阵的缩放比例（均一缩放）。</summary>
         private double CurrentScale => _viewMatrix.M11;
 
+        /// <summary>
+        /// 鼠标模式触控手势开关（组件弹窗控制）：开启时鼠标模式下单指平移、双指缩放 PDF。
+        /// 笔模式下双指缩放恒可用（宿主对注册了手势处理的插件强制放行双指）。
+        /// </summary>
+        internal bool TouchGesturesEnabled { get; set; } = true;
+
+        /// <summary>
+        /// 当前是否为笔类模式（笔/荧光笔/橡皮/选择）。由插件按宿主 PenModeChanged 事件维护；
+        /// 只有纯鼠标模式（cursor）才允许单指平移，避免与选择拖拽、橡皮擦除抢手势。
+        /// </summary>
+        internal bool IsPenMode { get; set; } = true;
+
         public bool OnCanvasGestureStarting(ManipulationStartingEventArgs e)
         {
             if (!IsOpen || _backgroundView == null) return false;
-            if ((e.Manipulators?.Count() ?? 0) < 2) return false;
+
+            int count = e.Manipulators?.Count() ?? 0;
+            if (count == 0) return false;
+
+            if (count == 1)
+            {
+                // 鼠标模式 + 开关开启：单指平移 PDF；其余情况交还宿主（笔模式=书写等）。
+                if (IsPenMode || !TouchGesturesEnabled) return false;
+                e.Mode = ManipulationModes.Translate;
+                _gestureActive = true;
+                return true;
+            }
+
+            // 双指：鼠标模式且开关关闭时也吞掉（Mode=None 使操纵不产生增量），
+            // 避免宿主回落到它自己的画布手势——那只变换墨迹、背景不动，墨迹会脱离 PDF。
+            if (!IsPenMode && !TouchGesturesEnabled)
+            {
+                e.Mode = ManipulationModes.None;
+                return true;
+            }
 
             // 只声明缩放 + 平移：双指捏合缩放 / 双指平移。不加旋转避免误旋转。
             e.Mode = ManipulationModes.Scale | ManipulationModes.Translate;
@@ -576,13 +607,31 @@ namespace PdfReader
         public bool OnCanvasGestureDelta(ManipulationDeltaEventArgs e)
         {
             if (!IsOpen || _backgroundView == null) return false;
-            if ((e.Manipulators?.Count() ?? 0) < 2) return false;
+
+            int count = e.Manipulators?.Count() ?? 0;
+            if (count == 0) return false;
 
             try
             {
                 var delta = e.DeltaManipulation;
                 double tx = delta.Translation.X;
                 double ty = delta.Translation.Y;
+
+                if (count == 1)
+                {
+                    // 单指平移（鼠标模式 + 开关开启时由 Starting 声明接管）。
+                    if (IsPenMode || !TouchGesturesEnabled || !_gestureActive) return false;
+                    if (Math.Abs(tx) < 0.001 && Math.Abs(ty) < 0.001) return true;
+
+                    var incTranslate = new Matrix();
+                    incTranslate.Translate(tx, ty);
+                    ApplyViewTransform(incTranslate);
+                    return true;
+                }
+
+                // 鼠标模式开关关闭时 Starting 已吞掉，这里兜底消费。
+                if (!IsPenMode && !TouchGesturesEnabled) return true;
+
                 double factor = delta.Scale.Length > 0 ? (delta.Scale.X + delta.Scale.Y) / 2.0 : 1.0;
 
                 double oldScale = CurrentScale;
@@ -603,7 +652,7 @@ namespace PdfReader
             }
             catch (Exception ex)
             {
-                _logError?.Invoke("PDF 双指手势处理失败", ex);
+                _logError?.Invoke("PDF 手势处理失败", ex);
                 return true;
             }
         }
