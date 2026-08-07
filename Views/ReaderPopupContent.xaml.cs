@@ -52,7 +52,6 @@ namespace PdfReader.Views
             int total = _plugin?.PageCount ?? 0;
 
             PageText.Text = open ? string.Format(Strings.PageOfFormat, page + 1, total) : "—";
-            StatusText.Text = _plugin?.StatusText ?? string.Empty;
 
             double scale = _plugin?.ViewScale ?? 1.0;
             ZoomText.Text = open ? string.Format(Strings.ZoomFormat, (int)Math.Round(scale * 100)) : "—";
