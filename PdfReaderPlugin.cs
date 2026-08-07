@@ -257,6 +257,28 @@ namespace PdfReader
             SetStatus(Strings.ClosedNotice);
         }
 
+        /// <summary>
+        /// 白板模式切换（true=进入，false=退出）时隐藏/恢复 PDF 背景层。
+        /// 宿主对插件背景层不做白板处理：背景层注入在白板幕布（GridBackgroundCover）之上，
+        /// 不处理的话进白板后 PDF 当前页会一直盖在幕布上。
+        /// </summary>
+        private void OnWhiteboardModeChanged(bool isWhiteboardMode)
+        {
+            EmbeddedReaderSession session;
+            lock (_gate) session = _session;
+            if (session == null || !session.IsOpen) return;
+
+            try
+            {
+                if (isWhiteboardMode) session.SuspendForWhiteboard();
+                else session.ResumeAfterWhiteboard();
+            }
+            catch (Exception ex)
+            {
+                LogError("白板模式切换处理失败", ex);
+            }
+        }
+
         /// <summary>视图矩阵（缩放/平移）变化时刷新弹窗的缩放百分比。</summary>
         private void Session_ViewTransformChanged()
         {

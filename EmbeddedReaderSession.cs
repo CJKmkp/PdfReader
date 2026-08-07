@@ -322,17 +322,8 @@ namespace PdfReader
 
             try
             {
-                var descriptor = new PresentationSourceDescriptor
-                {
-                    Id = PresentationSourceId,
-                    Name = Strings.PluginName,
-                    PageCount = pageCount,
-                    CurrentPage = CurrentPage + 1,
-                    NavigateAsync = HandleHostNavigationAsync,
-                    AllowPageNumberClick = false
-                };
-
-                await _presentation.BeginAsync(descriptor, cancellationToken).ConfigureAwait(false);
+                await _presentation.BeginAsync(CreatePresentationDescriptor(pageCount), cancellationToken)
+                    .ConfigureAwait(false);
 
                 if (_presentation.IsActive)
                 {
@@ -344,6 +335,55 @@ namespace PdfReader
             catch (Exception ex)
             {
                 _logError?.Invoke("进入放映模式失败", ex);
+            }
+        }
+
+        /// <summary>构建外部演示源描述符（进入放映与退出白板重放共用）。</summary>
+        private PresentationSourceDescriptor CreatePresentationDescriptor(int pageCount)
+        {
+            return new PresentationSourceDescriptor
+            {
+                Id = PresentationSourceId,
+                Name = Strings.PluginName,
+                PageCount = pageCount,
+                CurrentPage = CurrentPage + 1,
+                NavigateAsync = HandleHostNavigationAsync,
+                AllowPageNumberClick = false
+            };
+        }
+
+        /// <summary>
+        /// 重放外部演示源，恢复宿主的放映翻页条。
+        /// 宿主退出白板时只恢复真实 PPT 的翻页条（恢复条件写死 <c>PPTManager.IsInSlideShow</c>），
+        /// 外部演示源（PDF）的翻页条进白板被收起后不会自动恢复；
+        /// 重新 <see cref="IPresentationSourceService.BeginAsync"/> 会让宿主完整重放
+        /// 「显示翻页条 + 放映布局」流程，把翻页条救回来。
+        /// 注意：BeginAsync 会先结束当前演示源并触发 <see cref="IPresentationSourceService.Ended"/>，
+        /// 而 <see cref="OnPresentationEnded"/> 会执行 <see cref="Close"/> 关闭文档，
+        /// 因此必须先退订 Ended 再重订。
+        /// </summary>
+        private async Task ReplayPresentationAsync()
+        {
+            if (_presentation == null || !_presentationActive || !IsOpen) return;
+
+            try { _presentation.Ended -= OnPresentationEnded; }
+            catch { }
+
+            try
+            {
+                var descriptor = CreatePresentationDescriptor(PageCount);
+                bool ok = await _presentation.BeginAsync(descriptor, CancellationToken.None)
+                    .ConfigureAwait(false);
+                _presentationActive = ok && _presentation.IsActive;
+            }
+            catch (Exception ex)
+            {
+                _logError?.Invoke("退出白板重放放映模式失败", ex);
+            }
+            finally
+            {
+                try { _presentation.Ended += OnPresentationEnded; }
+                catch { }
             }
         }
 
@@ -491,7 +531,10 @@ namespace PdfReader
 
             if (_displayMode == PdfDisplayMode.ContinuousScroll)
             {
-                double step = delta > 0 ? 60 : -60;
+                // 滚轮语义：向上滚（delta>0）= 视图往开头走（上一页方向），
+                // 向下滚 = 视图往结尾走（下一页方向），与翻页模式和浏览器惯例一致。
+                // 之前把正 delta 当成向前滚动，方向反了。
+                double step = delta > 0 ? -60 : 60;
                 _ = ScrollByAsync(step);
             }
             else
@@ -1083,6 +1126,58 @@ namespace PdfReader
             }
 
             return _composition.ExportWithInkAsync(outputPath, 0u, cancellationToken);
+        }
+
+        /// <summary>
+        /// 进入白板模式：先把当前画布墨迹归位到当前页缓存（宿主随后会备份并清空画布），
+        /// 再隐藏 PDF 背景层并注销画布手势接管，让白板完全回归宿主自己的行为。
+        /// 不能移除背景层：宿主的 RemoveBackgroundLayer 会清空按页墨迹缓存（PDF 批注丢失）。
+        /// </summary>
+        public void SuspendForWhiteboard()
+        {
+            if (!IsOpen) return;
+
+            // 事件在宿主清空画布之前触发，此处同步归位墨迹到页缓存；
+            // SetPluginVisiblePagesAsync 在 UI 线程内联执行，事件回调返回前即完成。
+            try { _ = SyncVisiblePagesAsync(CancellationToken.None); }
+            catch (Exception ex) { _logError?.Invoke("进入白板前墨迹归位失败", ex); }
+
+            // 白板期间画布上的笔迹不再属于 PDF，注销手势接管避免双指缩放误伤白板墨迹。
+            try { _composition.SetCanvasGestureHandler(null); }
+            catch (Exception ex) { _logError?.Invoke("进入白板注销手势接管失败", ex); }
+
+            var view = _backgroundView;
+            if (view == null) return;
+
+            if (view.Dispatcher.CheckAccess()) view.Visibility = Visibility.Collapsed;
+            else view.Dispatcher.Invoke(() => view.Visibility = Visibility.Collapsed);
+        }
+
+        /// <summary>
+        /// 退出白板模式：恢复 PDF 背景显示、重新接管手势、按当前页恢复墨迹，
+        /// 并重放一次放映模式以救回宿主不再自动恢复的翻页条（见 <see cref="ReplayPresentationAsync"/>）。
+        /// 必须推迟到宿主收尾流程（SaveStrokes/ClearStrokes/RestoreStrokes）完成之后执行：
+        /// 事件触发时白板笔迹还在画布上，立刻同步会把它们误存进 PDF 页缓存；
+        /// 宿主恢复「进入白板前」的主备份墨迹后画布已干净，此时同步才正确。
+        /// </summary>
+        public void ResumeAfterWhiteboard()
+        {
+            var view = _backgroundView;
+            if (view == null || !IsOpen) return;
+
+            view.Dispatcher.BeginInvoke(new Action(() =>
+            {
+                if (!IsOpen || !ReferenceEquals(view, _backgroundView)) return;
+
+                view.Visibility = Visibility.Visible;
+
+                try { _composition.SetCanvasGestureHandler(this); }
+                catch (Exception ex) { _logError?.Invoke("退出白板恢复手势接管失败", ex); }
+
+                SyncVisiblePagesAsync();
+
+                _ = ReplayPresentationAsync();
+            }), System.Windows.Threading.DispatcherPriority.Loaded);
         }
 
         /// <summary>关闭文档并移除背景层。</summary>
