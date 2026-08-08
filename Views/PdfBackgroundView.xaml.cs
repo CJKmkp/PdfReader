@@ -4,6 +4,7 @@ using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Media;
 using System.Windows.Media.Animation;
+using System.Windows.Shapes;
 using Ink_Canvas.Plugins;
 
 namespace PdfReader.Views
@@ -29,8 +30,14 @@ namespace PdfReader.Views
     /// </summary>
     public partial class PdfBackgroundView : UserControl
     {
-        /// <summary>页与页之间的空白带高度（DIP）。</summary>
-        private const double PageGutter = 32;
+        /// <summary>
+        /// 页与页之间的空白带高度（DIP）。0 = 两页连续拼接，接缝处以低透明度灰色虚线分隔
+        /// （参考 Adobe 连续滚动视图），不再有深色空隙。
+        /// </summary>
+        private const double PageGutter = 0;
+
+        /// <summary>页接缝分隔线厚度（DIP）。</summary>
+        private const double PageSeparatorThickness = 1.0;
 
         /// <summary>双页模式左右页之间的间隙（DIP）。</summary>
         private const double DoublePageGutter = 12;
@@ -43,6 +50,9 @@ namespace PdfReader.Views
 
         /// <summary>长条里每页的源。</summary>
         private readonly List<ImageSource> _pageSources = new List<ImageSource>();
+
+        /// <summary>页接缝的分隔线（低透明度灰色虚线），与页一一对应（第 i 条 = 第 i 页下边界）。</summary>
+        private readonly List<Line> _pageSeparators = new List<Line>();
 
         /// <summary>当前滚动偏移（DIP）。</summary>
         private double _scrollOffset;
@@ -274,6 +284,7 @@ namespace PdfReader.Views
             Strip.Children.Clear();
             _pageImages.Clear();
             _pageSources.Clear();
+            _pageSeparators.Clear();
 
             double top = 0;
             for (int i = 0; i < pageCount; i++)
@@ -328,6 +339,21 @@ namespace PdfReader.Views
             double viewH = ActualHeight;
             if (viewW <= 0) return;
 
+            // 分隔线数量 = 页数 - 1（页与页之间的接缝）。
+            int separatorCount = Math.Max(0, _pageImages.Count - 1);
+            while (_pageSeparators.Count < separatorCount)
+            {
+                var line = new Line
+                {
+                    Stroke = new SolidColorBrush(Color.FromArgb(96, 128, 128, 128)), // 低透明度灰色
+                    StrokeThickness = PageSeparatorThickness,
+                    StrokeDashArray = new DoubleCollection { 2.0, 2.0 },
+                    IsHitTestVisible = false
+                };
+                _pageSeparators.Add(line);
+                Strip.Children.Add(line);
+            }
+
             double top = 0;
             for (int i = 0; i < _pageImages.Count; i++)
             {
@@ -343,8 +369,20 @@ namespace PdfReader.Views
 
                 img.Width = w;
                 img.Height = h;
-                Canvas.SetLeft(img, (viewW - w) / 2);
+                double left = (viewW - w) / 2;
+                Canvas.SetLeft(img, left);
                 Canvas.SetTop(img, top);
+
+                // 页接缝处画分隔线：跨当前页宽度，压在边界上（1px 线各占两页 0.5px）。
+                if (i < separatorCount)
+                {
+                    var sep = _pageSeparators[i];
+                    sep.X1 = left;
+                    sep.X2 = left + w;
+                    sep.Y1 = top + h;
+                    sep.Y2 = top + h;
+                }
+
                 top += h + PageGutter;
             }
             StripHeight = top - PageGutter;

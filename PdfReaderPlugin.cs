@@ -1,6 +1,7 @@
 using System;
 using System.Globalization;
 using System.IO;
+using System.Reflection;
 using System.Threading;
 using System.Threading.Tasks;
 using System.Windows;
@@ -39,7 +40,28 @@ namespace PdfReader
         private IPresentationSourceService _presentation;
 
         private INotificationService _notificationService;
+        private IEventService _eventService;
+        private IWindowService _windowService;
+        private ICanvasInkService _canvasInkService;
         private EmbeddedReaderSession _session;
+
+        /// <summary>当前是否处于白板模式（由 WhiteboardModeChanged 事件维护）。</summary>
+        private bool _isWhiteboardMode;
+
+        /// <summary>当前是否笔类模式（笔/荧光笔/橡皮/选择）；false = 纯鼠标模式。默认按笔处理更安全。</summary>
+        private bool _isPenMode = true;
+
+        /// <summary>本次 PDF 是从白板里打开的：关闭后要回到白板。</summary>
+        private bool _openedFromWhiteboard;
+
+        /// <summary>打开流程中我们自己退出白板的标志，避免误清 _openedFromWhiteboard。</summary>
+        private bool _exitingWhiteboardForOpen;
+
+        /// <summary>白板工具栏按钮承载的弹窗（关闭 PDF 时一并收起）。</summary>
+        private System.Windows.Controls.Primitives.Popup _boardPopup;
+
+        /// <summary>白板弹窗的独立内容实例（与浮动弹窗的 _popup 隔离，避免两个 Popup 争用同一内容）。</summary>
+        private ReaderPopupContent _boardPopupContent;
         private SettingsView _settingsView;
         private ReaderPopupContent _popup;
         private string _statusText = string.Empty;
@@ -76,6 +98,34 @@ namespace PdfReader
                 Log("宿主未提供演示源服务，PDF 将不进入放映模式（滚轮翻页与弹窗控制仍可用）。");
             }
 
+            // 订阅白板模式切换：进入白板时隐藏 PDF 背景，退出时恢复（见 OnWhiteboardModeChanged）。
+            try { _eventService = GetService<IEventService>(); }
+            catch { _eventService = null; }
+
+            if (_eventService != null)
+            {
+                try { _eventService.WhiteboardModeChanged += OnWhiteboardModeChanged; }
+                catch { _eventService = null; }
+
+                if (_eventService != null)
+                {
+                    // 笔/鼠标模式：控制鼠标模式下单指平移是否接管（见 OnPenModeChanged）。
+                    try { _eventService.PenModeChanged += OnPenModeChanged; }
+                    catch { }
+                }
+            }
+
+            // 白板与 PDF 互操作（打开前退出白板、关闭后回到白板）需要的服务。
+            try { _canvasInkService = GetService<ICanvasInkService>(); }
+            catch { _canvasInkService = null; }
+
+            try
+            {
+                _windowService = GetService<IWindowService>();
+                _isWhiteboardMode = _windowService?.IsWhiteboardMode ?? false;
+            }
+            catch { _windowService = null; }
+
             RegisterToolbarButton(host);
             Log("工具栏组件「" + Strings.PluginName + "」已注册。");
         }
@@ -101,6 +151,7 @@ namespace PdfReader
                         button.SetResourceReference(ToolbarImageButton.IconBrushProperty, "IconForeground");
                     }
                     catch { }
+                    NudgeIconAndLabel(button);
                     return button;
                 },
                 ApplyOrientation = (view, orientation) =>
@@ -117,6 +168,129 @@ namespace PdfReader
             };
 
             host.RegisterToolbarItem(item);
+            RegisterBoardToolbarItem(host, item, iconMarkup);
+        }
+
+        /// <summary>
+        /// 向白板工具栏注册同款 PDF 组件：白板模式下浮动栏隐藏，用户仍能从板工具栏打开 PDF 弹窗。
+        /// 宿主板工具栏的插件包装器（PluginBoardToolbarItemWrapper）不接 PopupContentFactory，
+        /// 因此这里自建一个承载同一份弹窗内容的 Popup，点击按钮开合。
+        /// 宿主 SDK 较旧（无 RegisterBoardToolbarItem）时静默跳过，不影响浮动栏功能。
+        /// </summary>
+        private void RegisterBoardToolbarItem(IPluginHost host, PluginToolbarItemInfo item, string iconMarkup)
+        {
+            try
+            {
+                host.RegisterBoardToolbarItem(new PluginToolbarItemInfo
+                {
+                    Id = item.Id,
+                    DisplayName = item.DisplayName,
+                    Description = item.Description,
+                    IconGeometry = item.IconGeometry,
+                    PopupContentFactory = item.PopupContentFactory,
+                    ViewFactory = () =>
+                    {
+                        // 用宿主自己的板工具栏按钮（BoardToolbarButton）：图标 20×20、文字 12 号、
+                        // 无按压阴影，与宿主其它白板组件外观一致（浮动栏按钮是 24×24 + 13 号 + 按压反馈）。
+                        var button = new BoardToolbarButton
+                        {
+                            Label = Strings.ToolbarButton,
+                            IconGeometry = iconMarkup ?? FallbackIconGeometry
+                        };
+
+                        // 板工具栏的插件弹窗由插件自己承载：定位在按钮上方，点击按钮开合。
+                        var popup = new System.Windows.Controls.Primitives.Popup
+                        {
+                            AllowsTransparency = true,
+                            StaysOpen = true,
+                            Focusable = true,
+                            IsOpen = false,
+                            PlacementTarget = button,
+                            Placement = System.Windows.Controls.Primitives.PlacementMode.Custom
+                        };
+                        popup.CustomPopupPlacementCallback = (popupSize, targetSize, offset) => new[]
+                        {
+                            new System.Windows.Controls.Primitives.CustomPopupPlacement(
+                                new Point(targetSize.Width / 2 - popupSize.Width / 2, -popupSize.Height - 8),
+                                System.Windows.Controls.Primitives.PopupPrimaryAxis.Vertical)
+                        };
+                        _boardPopup = popup;
+
+                        // 板弹窗用自己的内容实例，与浮动弹窗的 _popup 隔离：
+                        // 共享实例会被两个 Popup 争用（reparent），且关闭按钮的 Tag 防重接线会互相冲突。
+                        var popupContent = new ReaderPopupContent(this);
+                        _boardPopupContent = popupContent;
+
+                        // 标题栏 X 接线：宿主经验是弹窗未打开时嵌套 Shell 的视觉树可能不完整，
+                        // 因此创建时接一次、Opened 后再补接一次（与宿主 ToolbarRegistry 同款做法）。
+                        try
+                        {
+                            WireBoardPopupCloseButton(popupContent, popup);
+                            popup.Opened += (s, e) => WireBoardPopupCloseButton(popupContent, popup);
+                        }
+                        catch { }
+
+                        button.ButtonMouseUp += (s, e) =>
+                        {
+                            if (popup.IsOpen)
+                            {
+                                popup.IsOpen = false;
+                            }
+                            else
+                            {
+                                popup.Child = popupContent;
+                                popup.IsOpen = true;
+                            }
+                        };
+                        return button;
+                    }
+                });
+            }
+            catch (Exception ex)
+            {
+                LogError("注册白板工具栏 PDF 组件失败（宿主 SDK 可能较旧）", ex);
+            }
+        }
+
+        /// <summary>
+        /// 把弹窗内容里 PopupShellContent 的标题栏关闭按钮接到 popup 收起。
+        /// 用 Tag 记录已接线的 popup，避免 Opened 补接时重复订阅。
+        /// </summary>
+        private static void WireBoardPopupCloseButton(ReaderPopupContent popupContent,
+            System.Windows.Controls.Primitives.Popup popup)
+        {
+            if (popupContent == null || popup == null) return;
+
+            var closeButton = popupContent.Shell?.CloseButtonControl;
+            if (closeButton == null) return;
+            if (ReferenceEquals(closeButton.Tag, popup)) return;
+
+            closeButton.Tag = popup;
+            closeButton.Click += (_, __) => popup.IsOpen = false;
+        }
+
+        /// <summary>
+        /// 只对 PDF 按钮生效的微调：把图标与文字标签整体下移 1px、右移 1px。
+        /// <see cref="ToolbarImageButton"/> 是宿主共享控件，改它的 Margin 会影响所有浮动栏按钮；
+        /// 这里通过反射拿内部元素并加 <see cref="TranslateTransform"/>，只移动当前按钮的图标与文字。
+        /// 用 RenderTransform 而不是 Margin，是因为宿主切换紧凑模式时会重置 Margin、不会动 RenderTransform。
+        /// </summary>
+        private static void NudgeIconAndLabel(ToolbarImageButton button)
+        {
+            try
+            {
+                const double shiftX = 1.0;
+                const double shiftY = 1.0;
+                var type = button.GetType();
+                if (type.GetField("ButtonImage", BindingFlags.NonPublic | BindingFlags.Instance)?.GetValue(button) is Image image)
+                    image.RenderTransform = new TranslateTransform(shiftX, shiftY);
+                if (type.GetField("LabelTextBlock", BindingFlags.NonPublic | BindingFlags.Instance)?.GetValue(button) is TextBlock label)
+                    label.RenderTransform = new TranslateTransform(shiftX, shiftY);
+            }
+            catch
+            {
+                // 宿主控件内部结构变化时静默跳过：仅该按钮不获得偏移，不影响其它功能。
+            }
         }
 
         #region 供弹窗与设置页调用
@@ -166,6 +340,18 @@ namespace PdfReader
             };
 
             if (dialog.ShowDialog() != true) return;
+
+            // 白板模式下打开 PDF：先退出白板，让 PDF 正常成为画布背景；
+            // 关闭 PDF 后由 AfterPdfClosed 回到白板。
+            if (_isWhiteboardMode && _canvasInkService != null)
+            {
+                _exitingWhiteboardForOpen = true;
+                try { _canvasInkService.ExitWhiteboard(); }
+                catch (Exception ex) { LogError("打开 PDF 前退出白板失败", ex); }
+                finally { _exitingWhiteboardForOpen = false; }
+                _openedFromWhiteboard = true;
+            }
+
             await OpenDocumentAsync(dialog.FileName, 0).ConfigureAwait(false);
         }
 
@@ -190,6 +376,9 @@ namespace PdfReader
                 }
 
                 await session.OpenAsync(path, initialPage, CancellationToken.None).ConfigureAwait(false);
+
+                // 打开 PDF 后自动开启双指缩放/移动：把当前的笔模式同步给会话（单指平移门控用）。
+                session.IsPenMode = _isPenMode;
 
                 _config.LastDocumentPath = path;
                 _config.LastPageIndex = session.CurrentPage;
@@ -229,6 +418,86 @@ namespace PdfReader
         private void Session_Closed()
         {
             SetStatus(Strings.ClosedNotice);
+            AfterPdfClosed();
+        }
+
+        /// <summary>PDF 关闭/放映结束后的收尾：收起板工具栏弹窗；从白板打开的则回到白板。</summary>
+        private void AfterPdfClosed()
+        {
+            try
+            {
+                if (_boardPopup != null) _boardPopup.IsOpen = false;
+            }
+            catch { }
+
+            if (!_openedFromWhiteboard) return;
+            _openedFromWhiteboard = false;
+
+            // 已在白板（用户中途手动进入）就不重复切换：宿主的 EnterWhiteboard 是取反切换。
+            if (_windowService == null || _isWhiteboardMode) return;
+
+            try { _windowService.EnterWhiteboard(); }
+            catch (Exception ex) { LogError("关闭 PDF 后回到白板失败", ex); }
+        }
+
+        /// <summary>渲染质量档位变化：保存配置并让会话清缓存、按新档位重渲染当前视图。</summary>
+        internal void SetRenderQuality(RenderQualityMode mode)
+        {
+            // 质量档内存占用大，用宿主通知提示一次（风格与宿主一致）。
+            if (mode == RenderQualityMode.Quality)
+                Notify(Strings.QualityWarning, NotificationLevel.Warning);
+
+            if (_config != null)
+            {
+                _config.RenderQuality = mode;
+                SaveConfig();
+            }
+
+            EmbeddedReaderSession session;
+            lock (_gate) session = _session;
+            if (session == null) return;
+
+            try { _ = session.ReloadRenderQualityAsync(); }
+            catch (Exception ex) { LogError("按新渲染质量重渲染失败", ex); }
+        }
+
+        /// <summary>笔/鼠标模式切换（true=笔类，false=鼠标）：同步给会话，控制单指平移是否接管。</summary>
+        private void OnPenModeChanged(bool isPenMode)
+        {
+            _isPenMode = isPenMode;
+
+            EmbeddedReaderSession session;
+            lock (_gate) session = _session;
+            if (session == null) return;
+            session.IsPenMode = isPenMode;
+        }
+
+        /// <summary>
+        /// 白板模式切换（true=进入，false=退出）时隐藏/恢复 PDF 背景层。
+        /// 宿主对插件背景层不做白板处理：背景层注入在白板幕布（GridBackgroundCover）之上，
+        /// 不处理的话进白板后 PDF 当前页会一直盖在幕布上。
+        /// </summary>
+        private void OnWhiteboardModeChanged(bool isWhiteboardMode)
+        {
+            _isWhiteboardMode = isWhiteboardMode;
+
+            // 用户手动退出白板（非打开 PDF 触发的退出）：关闭 PDF 后不再自动回白板。
+            if (!isWhiteboardMode && !_exitingWhiteboardForOpen)
+                _openedFromWhiteboard = false;
+
+            EmbeddedReaderSession session;
+            lock (_gate) session = _session;
+            if (session == null || !session.IsOpen) return;
+
+            try
+            {
+                if (isWhiteboardMode) session.SuspendForWhiteboard();
+                else session.ResumeAfterWhiteboard();
+            }
+            catch (Exception ex)
+            {
+                LogError("白板模式切换处理失败", ex);
+            }
         }
 
         /// <summary>视图矩阵（缩放/平移）变化时刷新弹窗的缩放百分比。</summary>
@@ -342,6 +611,7 @@ namespace PdfReader
 
             session.Close();
             SetStatus(Strings.ClosedNotice);
+            AfterPdfClosed();
         }
 
         internal void SaveConfig()
@@ -400,6 +670,17 @@ namespace PdfReader
                 else popup.Dispatcher.BeginInvoke(new Action(popup.RefreshState));
             }
             catch { }
+
+            // 白板弹窗是独立实例，同样要同步页码/按钮可用状态。
+            var boardPopup = _boardPopupContent;
+            if (boardPopup == null || ReferenceEquals(boardPopup, popup)) return;
+
+            try
+            {
+                if (boardPopup.Dispatcher.CheckAccess()) boardPopup.RefreshState();
+                else boardPopup.Dispatcher.BeginInvoke(new Action(boardPopup.RefreshState));
+            }
+            catch { }
         }
 
         private void ShowError(string message)
@@ -433,6 +714,13 @@ namespace PdfReader
 
         public override void Shutdown()
         {
+            if (_eventService != null)
+            {
+                try { _eventService.WhiteboardModeChanged -= OnWhiteboardModeChanged; }
+                catch { }
+                try { _eventService.PenModeChanged -= OnPenModeChanged; }
+                catch { }
+            }
             DisposeSession();
             SaveConfig();
             Log($"{Name} 已关闭");

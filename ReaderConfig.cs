@@ -10,7 +10,14 @@ namespace PdfReader
     /// </summary>
     internal sealed class ReaderConfig
     {
-        /// <summary>页面渲染倍率（相对页面原始尺寸）。越大越清晰，内存占用也越大。</summary>
+        /// <summary>
+        /// 渲染质量档位：性能=固定 2.0 倍（默认，现状水平）；均衡=固定 3.0 倍；
+        /// 质量=按视口算到最大缩放（8×）下吃满显示密度，上限放宽到 16384px/320MP。
+        /// </summary>
+        [JsonPropertyName("renderQuality")]
+        public RenderQualityMode RenderQuality { get; set; } = RenderQualityMode.Performance;
+
+        /// <summary>旧版渲染倍率（1–4×），设置页滑条仍读写它，但渲染已按 <see cref="RenderQuality"/> 走。</summary>
         [JsonPropertyName("renderScale")]
         public double RenderScale { get; set; } = 2.0;
 
@@ -27,7 +34,7 @@ namespace PdfReader
         [JsonPropertyName("lastPageIndex")]
         public int LastPageIndex { get; set; }
 
-        /// <summary>渲染倍率的有效值，限制在 1.0–4.0，与宿主合成倍率上限一致。</summary>
+        /// <summary>旧版渲染倍率的有效值，限制在 1.0–4.0（设置页滑条显示用）。</summary>
         [JsonIgnore]
         public double NormalizedRenderScale
         {

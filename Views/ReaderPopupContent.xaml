@@ -12,9 +12,7 @@
         <controls:PopupShellContent x:Name="Shell" d:Visibility="Collapsed" />
         <ContentControl x:Name="InnerContentHost" Visibility="Collapsed" d:Visibility="Visible">
             <ikw:SimpleStackPanel Margin="10" Spacing="8" HorizontalAlignment="Stretch">
-                <TextBlock x:Name="StatusText" TextWrapping="Wrap" MaxWidth="260"
-                           Foreground="{DynamicResource FloatingBarForegroundBrush}"
-                           FontSize="13" />
+                <!-- 左上角状态行已移除：翻页信息与中间页码重复（页码统一看翻页按钮中间的显示） -->
 
                 <ikw:SimpleStackPanel Orientation="Horizontal" Spacing="6" HorizontalAlignment="Center">
                     <Button x:Name="PreviousButton" Padding="10,4" MinWidth="72"
@@ -28,6 +26,10 @@
 
                 <ComboBox x:Name="DisplayModeCombo" MinWidth="140" HorizontalAlignment="Center"
                           SelectionChanged="DisplayModeCombo_SelectionChanged" />
+
+                <!-- 渲染质量：性能 / 均衡 / 质量 -->
+                <ComboBox x:Name="QualityCombo" MinWidth="140" HorizontalAlignment="Center"
+                          SelectionChanged="QualityCombo_SelectionChanged" />
 
                 <ikw:SimpleStackPanel Orientation="Horizontal" Spacing="6" HorizontalAlignment="Center">
                     <TextBlock x:Name="ZoomText" VerticalAlignment="Center" MinWidth="76"

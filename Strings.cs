@@ -94,6 +94,12 @@ namespace PdfReader
             : "在工具栏组件库中添加「PDF」按钮，点击即可把 PDF 加载为画布背景。批注使用宿主自带的墨迹工具，按页自动记忆；导出会把页面与墨迹一起写入新的 PDF。";
         public static string SettingsOpenNow => IsEnglish ? "Open PDF" : "打开 PDF";
         public static string SettingsRenderScale => IsEnglish ? "Render scale" : "渲染倍率";
+        public static string QualityPerformance => IsEnglish ? "Performance" : "性能";
+        public static string QualityBalanced => IsEnglish ? "Balanced" : "均衡";
+        public static string QualityQuality => IsEnglish ? "Quality" : "质量";
+        public static string QualityWarning => IsEnglish
+            ? "Quality mode renders pages at full resolution for the 8× maximum zoom. Memory usage is very high (a single page can take 100 MB – 1 GB). Consider raising the page cache budget; page turns on large documents will be slower."
+            : "质量模式会按最大缩放（8×）所需的完整分辨率渲染页面，内存占用很大（单页可达 100MB – 1GB）。建议调大页面缓存上限，大文档翻页会变慢。";
         public static string SettingsRememberLast => IsEnglish
             ? "Reload the last document and page"
             : "重新打开时恢复上次的文档与页码";

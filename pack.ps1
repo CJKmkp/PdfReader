@@ -1,4 +1,4 @@
-# 打包 PdfReader 插件为 .icpx（ZIP）包。
+﻿# 打包 PdfReader 插件为 .icpx（ZIP）包。
 # .icpx 内容：manifest.json、PdfReader.dll、PdfReader.deps.json
 # 文件名必须与 PluginIndex 里 downloadPath 声明的一致（插件 id），否则市场下载会 404。
 param(
@@ -28,7 +28,9 @@ try {
 
     # 插件自带全部运行时依赖（iNKORE 三件套、SDK、DI 等），随 .icpx 分发。
     # 这些 DLL 由 CopyLocalLockFileAssemblies=true 复制到输出目录。
-    $runtimeFiles = Get-ChildItem $outDir -File | Where-Object { $_.Extension -in ".dll", ".deps.json" }
+    # FileInfo.Extension 只返回最后一个扩展名（"X.deps.json" 的 Extension 是 ".json"），
+    # 所以不能用 -in ".deps.json" 匹配，改用 -like 通配。
+    $runtimeFiles = Get-ChildItem $outDir -File | Where-Object { $_.Extension -eq ".dll" -or $_.Name -like "*.deps.json" }
     if (-not $runtimeFiles) { throw "输出目录没有可打包的 DLL：$outDir" }
     foreach ($f in $runtimeFiles) {
         Copy-Item $f.FullName (Join-Path $staging $f.Name) -Force

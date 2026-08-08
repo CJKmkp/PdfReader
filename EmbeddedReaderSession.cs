@@ -56,6 +56,15 @@ namespace PdfReader
         /// <summary>当前展示模式。</summary>
         private PdfDisplayMode _displayMode = PdfDisplayMode.SinglePage;
 
+        /// <summary>背景层视口尺寸（UI 线程 SizeChanged 维护；质量档位据此算渲染倍率）。</summary>
+        private Size _viewportSize;
+
+        /// <summary>显示器 DPI 缩放（UI 线程维护；质量档密度按物理像素计算，否则高 DPI 屏上位图被拉伸变软）。</summary>
+        private double _dpiScale = 1.0;
+
+        /// <summary>当前页最近一次渲染的宽度桶（质量档缩放跟随重渲染用）。</summary>
+        private int _currentPageWidthBucket = -1;
+
         /// <summary>
         /// 展示模式切换/文档重载进行中：屏蔽 SizeChanged/去抖触发的无参可见页同步，
         /// 避免用中间态矩形误清画布墨迹（切换瞬间画布仍是旧坐标系）。
@@ -315,35 +324,81 @@ namespace PdfReader
             else view.Dispatcher.Invoke(() => view.SetStripPageSource(pageIndex, bitmap));
         }
 
-        /// <summary>进入宿主放映模式。</summary>
+        /// <summary>
+        /// 进入宿主放映模式。重新打开文档时，BeginAsync 会先结束旧注册并触发 Ended（EndAsyncCore），
+        /// 若不退订，OnPresentationEnded 会把刚打开的新文档 Close 掉——因此与
+        /// <see cref="ReplayPresentationAsync"/> 一样采用「退订 → Begin → 重订」。
+        /// </summary>
         private async Task BeginPresentationAsync(int pageCount, CancellationToken cancellationToken)
         {
             if (_presentation == null || pageCount <= 0) return;
 
+            try { _presentation.Ended -= OnPresentationEnded; }
+            catch { }
+
             try
             {
-                var descriptor = new PresentationSourceDescriptor
-                {
-                    Id = PresentationSourceId,
-                    Name = Strings.PluginName,
-                    PageCount = pageCount,
-                    CurrentPage = CurrentPage + 1,
-                    NavigateAsync = HandleHostNavigationAsync,
-                    AllowPageNumberClick = false
-                };
-
-                await _presentation.BeginAsync(descriptor, cancellationToken).ConfigureAwait(false);
-
-                if (_presentation.IsActive)
-                {
-                    _presentationActive = true;
-                    try { _presentation.Ended += OnPresentationEnded; }
-                    catch { }
-                }
+                bool ok = await _presentation.BeginAsync(CreatePresentationDescriptor(pageCount), cancellationToken)
+                    .ConfigureAwait(false);
+                _presentationActive = ok && _presentation.IsActive;
             }
             catch (Exception ex)
             {
                 _logError?.Invoke("进入放映模式失败", ex);
+            }
+            finally
+            {
+                try { _presentation.Ended += OnPresentationEnded; }
+                catch { }
+            }
+        }
+
+        /// <summary>构建外部演示源描述符（进入放映与退出白板重放共用）。</summary>
+        private PresentationSourceDescriptor CreatePresentationDescriptor(int pageCount)
+        {
+            return new PresentationSourceDescriptor
+            {
+                Id = PresentationSourceId,
+                Name = Strings.PluginName,
+                PageCount = pageCount,
+                CurrentPage = CurrentPage + 1,
+                NavigateAsync = HandleHostNavigationAsync,
+                AllowPageNumberClick = false
+            };
+        }
+
+        /// <summary>
+        /// 重放外部演示源，恢复宿主的放映翻页条。
+        /// 宿主退出白板时只恢复真实 PPT 的翻页条（恢复条件写死 <c>PPTManager.IsInSlideShow</c>），
+        /// 外部演示源（PDF）的翻页条进白板被收起后不会自动恢复；
+        /// 重新 <see cref="IPresentationSourceService.BeginAsync"/> 会让宿主完整重放
+        /// 「显示翻页条 + 放映布局」流程，把翻页条救回来。
+        /// 注意：BeginAsync 会先结束当前演示源并触发 <see cref="IPresentationSourceService.Ended"/>，
+        /// 而 <see cref="OnPresentationEnded"/> 会执行 <see cref="Close"/> 关闭文档，
+        /// 因此必须先退订 Ended 再重订。
+        /// </summary>
+        private async Task ReplayPresentationAsync()
+        {
+            if (_presentation == null || !_presentationActive || !IsOpen) return;
+
+            try { _presentation.Ended -= OnPresentationEnded; }
+            catch { }
+
+            try
+            {
+                var descriptor = CreatePresentationDescriptor(PageCount);
+                bool ok = await _presentation.BeginAsync(descriptor, CancellationToken.None)
+                    .ConfigureAwait(false);
+                _presentationActive = ok && _presentation.IsActive;
+            }
+            catch (Exception ex)
+            {
+                _logError?.Invoke("退出白板重放放映模式失败", ex);
+            }
+            finally
+            {
+                try { _presentation.Ended += OnPresentationEnded; }
+                catch { }
             }
         }
 
@@ -433,7 +488,14 @@ namespace PdfReader
 
         private void BackgroundView_SizeChanged(object sender, SizeChangedEventArgs e)
         {
-            if (sender is PdfBackgroundView view) SyncVisiblePagesAsync();
+            if (sender is PdfBackgroundView view)
+            {
+                // UI 线程维护视口尺寸与 DPI；渲染线程（质量档位算倍率）只读，双 double 读安全。
+                _viewportSize = e.NewSize;
+                try { _dpiScale = VisualTreeHelper.GetDpi(view).DpiScaleX; }
+                catch { }
+                SyncVisiblePagesAsync();
+            }
         }
 
         private void AttachWheelHandler(PdfBackgroundView view)
@@ -473,9 +535,13 @@ namespace PdfReader
                 return;
 
             // Ctrl+滚轮：以光标为锚缩放（给无触摸屏环境提供缩放入口，与 PDF 查看器惯例一致）。
+            // 到最大/最小缩放档时 HandleZoom 返回 false（没有档位可进），此时也要吞掉事件，
+            // 否则会落到下面的翻页/滚动逻辑，变成「Ctrl+滚轮在极限时翻页」。
             if ((Keyboard.Modifiers & ModifierKeys.Control) != 0)
             {
                 if (HandleZoom(e.Delta > 0, local)) { e.Handled = true; return; }
+                e.Handled = true;
+                return;
             }
 
             if (HandleScroll(e.Delta)) e.Handled = true;
@@ -491,7 +557,10 @@ namespace PdfReader
 
             if (_displayMode == PdfDisplayMode.ContinuousScroll)
             {
-                double step = delta > 0 ? 60 : -60;
+                // 滚轮语义：向上滚（delta>0）= 视图往开头走（上一页方向），
+                // 向下滚 = 视图往结尾走（下一页方向），与翻页模式和浏览器惯例一致。
+                // 之前把正 delta 当成向前滚动，方向反了。
+                double step = delta > 0 ? -60 : 60;
                 _ = ScrollByAsync(step);
             }
             else
@@ -509,10 +578,41 @@ namespace PdfReader
         /// <summary>当前视图矩阵的缩放比例（均一缩放）。</summary>
         private double CurrentScale => _viewMatrix.M11;
 
+        /// <summary>
+        /// 鼠标模式触控手势开关（组件弹窗控制）：开启时鼠标模式下单指平移、双指缩放 PDF。
+        /// 笔模式下双指缩放恒可用（宿主对注册了手势处理的插件强制放行双指）。
+        /// </summary>
+        internal bool TouchGesturesEnabled { get; set; } = true;
+
+        /// <summary>
+        /// 当前是否为笔类模式（笔/荧光笔/橡皮/选择）。由插件按宿主 PenModeChanged 事件维护；
+        /// 只有纯鼠标模式（cursor）才允许单指平移，避免与选择拖拽、橡皮擦除抢手势。
+        /// </summary>
+        internal bool IsPenMode { get; set; } = true;
+
         public bool OnCanvasGestureStarting(ManipulationStartingEventArgs e)
         {
             if (!IsOpen || _backgroundView == null) return false;
-            if ((e.Manipulators?.Count() ?? 0) < 2) return false;
+
+            int count = e.Manipulators?.Count() ?? 0;
+            if (count == 0) return false;
+
+            if (count == 1)
+            {
+                // 鼠标模式 + 开关开启：单指平移 PDF；其余情况交还宿主（笔模式=书写等）。
+                if (IsPenMode || !TouchGesturesEnabled) return false;
+                e.Mode = ManipulationModes.Translate;
+                _gestureActive = true;
+                return true;
+            }
+
+            // 双指：鼠标模式且开关关闭时也吞掉（Mode=None 使操纵不产生增量），
+            // 避免宿主回落到它自己的画布手势——那只变换墨迹、背景不动，墨迹会脱离 PDF。
+            if (!IsPenMode && !TouchGesturesEnabled)
+            {
+                e.Mode = ManipulationModes.None;
+                return true;
+            }
 
             // 只声明缩放 + 平移：双指捏合缩放 / 双指平移。不加旋转避免误旋转。
             e.Mode = ManipulationModes.Scale | ManipulationModes.Translate;
@@ -523,13 +623,31 @@ namespace PdfReader
         public bool OnCanvasGestureDelta(ManipulationDeltaEventArgs e)
         {
             if (!IsOpen || _backgroundView == null) return false;
-            if ((e.Manipulators?.Count() ?? 0) < 2) return false;
+
+            int count = e.Manipulators?.Count() ?? 0;
+            if (count == 0) return false;
 
             try
             {
                 var delta = e.DeltaManipulation;
                 double tx = delta.Translation.X;
                 double ty = delta.Translation.Y;
+
+                if (count == 1)
+                {
+                    // 单指平移（鼠标模式 + 开关开启时由 Starting 声明接管）。
+                    if (IsPenMode || !TouchGesturesEnabled || !_gestureActive) return false;
+                    if (Math.Abs(tx) < 0.001 && Math.Abs(ty) < 0.001) return true;
+
+                    var incTranslate = new Matrix();
+                    incTranslate.Translate(tx, ty);
+                    ApplyViewTransform(incTranslate);
+                    return true;
+                }
+
+                // 鼠标模式开关关闭时 Starting 已吞掉，这里兜底消费。
+                if (!IsPenMode && !TouchGesturesEnabled) return true;
+
                 double factor = delta.Scale.Length > 0 ? (delta.Scale.X + delta.Scale.Y) / 2.0 : 1.0;
 
                 double oldScale = CurrentScale;
@@ -550,7 +668,7 @@ namespace PdfReader
             }
             catch (Exception ex)
             {
-                _logError?.Invoke("PDF 双指手势处理失败", ex);
+                _logError?.Invoke("PDF 手势处理失败", ex);
                 return true;
             }
         }
@@ -828,6 +946,40 @@ namespace PdfReader
             }
         }
 
+        /// <summary>
+        /// 质量档（翻页模式）：当前页的渲染密度与显示密度相差超过一个桶时，
+        /// 按当前显示密度重渲染当前页——接近矢量的逐级光栅化，与主流 PDF 浏览器一致。
+        /// 用 _navigating 与翻页互斥：渲染期间用户翻页会先暂存，渲染完成后继续。
+        /// </summary>
+        private async Task MaybeReRenderForZoomAsync()
+        {
+            if (_config.RenderQuality != RenderQualityMode.Quality) return;
+            if (_displayMode == PdfDisplayMode.ContinuousScroll) return;
+            if (!IsOpen || _backgroundView == null) return;
+
+            PdfDocumentSession document;
+            lock (_gate) document = _document;
+            if (document == null) return;
+
+            int page = CurrentPage;
+            int width = ComputeRenderWidth(document, page);
+            int bucket = width / ZoomModel.WidthBucket;
+            if (bucket == _currentPageWidthBucket) return;
+
+            // 抢到 _navigating 才开始；翻页进行中跳过（翻页自身已按当前密度渲染）。
+            if (Interlocked.CompareExchange(ref _navigating, 1, 0) != 0) return;
+            try
+            {
+                if (bucket == _currentPageWidthBucket) return;
+                _currentPageWidthBucket = bucket;
+                await RenderCurrentPageAsync(CancellationToken.None).ConfigureAwait(false);
+            }
+            finally
+            {
+                Interlocked.Exchange(ref _navigating, 0);
+            }
+        }
+
         /// <summary>滚动停止去抖后重建可见页集合，让宿主把墨迹切分/恢复到位。</summary>
         private void ScheduleSettleSync()
         {
@@ -863,6 +1015,9 @@ namespace PdfReader
                 return;
             }
 
+            // 质量档（翻页模式）：缩放停止/重置后按当前显示密度重渲染当前页。
+            _ = MaybeReRenderForZoomAsync();
+
             try
             {
                 IReadOnlyList<PluginVisiblePage> pages;
@@ -890,6 +1045,9 @@ namespace PdfReader
         {
             var view = _backgroundView;
             if (view == null) return;
+
+            // 质量档：重置缩放等路径也会走到这里，同样触发按当前密度重渲染。
+            _ = MaybeReRenderForZoomAsync();
 
             try
             {
@@ -1048,7 +1206,7 @@ namespace PdfReader
         private Task<BitmapSource> RenderPageForExportAsync(uint pageIndex, CancellationToken cancellationToken)
             => RenderPageAsync((int)pageIndex, cancellationToken);
 
-        /// <summary>按页面物理尺寸与配置倍率计算渲染宽度。</summary>
+        /// <summary>按页面物理尺寸与质量档位计算渲染宽度。</summary>
         private int ComputeRenderWidth(PdfDocumentSession document, int pageIndex)
         {
             double pageWidth;
@@ -1065,7 +1223,45 @@ namespace PdfReader
                 pageHeight = 792;
             }
 
-            return ZoomModel.ComputeRenderWidth(_config.NormalizedRenderScale, pageWidth, pageHeight, 1.0);
+            if (_config.RenderQuality == RenderQualityMode.Quality)
+            {
+                // 质量档：目标密度 = 视口适配 × 显示倍率 × DPI（物理像素）。
+                // 翻页模式跟随当前缩放逐级光栅化（见 MaybeReRenderForZoomAsync，接近矢量）；
+                // 连续滚动长条固定按最大缩放密度渲染，缩放时不再整体重渲。
+                double viewW = _viewportSize.Width;
+                double viewH = _viewportSize.Height;
+                double density = 3.0;
+                if (viewW > 0 && viewH > 0 && pageWidth > 0 && pageHeight > 0)
+                {
+                    double fit = Math.Min(viewW / pageWidth, viewH / pageHeight);
+                    if (fit > 0 && !double.IsInfinity(fit))
+                    {
+                        double zoom = _displayMode == PdfDisplayMode.ContinuousScroll
+                            ? ZoomModel.MaxScale
+                            : Math.Min(Math.Max(CurrentScale, 0.1), ZoomModel.MaxScale);
+                        density = Math.Max(3.0, fit * zoom * _dpiScale);
+                    }
+                }
+                return ZoomModel.ComputeQualityRenderWidth(density, pageWidth, pageHeight);
+            }
+
+            // 性能 = 固定 2.0（现状）；均衡 = 固定 3.0。
+            double factor = _config.RenderQuality == RenderQualityMode.Performance ? 2.0 : 3.0;
+            return ZoomModel.ComputeRenderWidth(factor, pageWidth, pageHeight, 1.0);
+        }
+
+        /// <summary>质量档位变化后：清缓存并按新档位重渲染当前视图（滚动模式重建长条）。</summary>
+        internal async Task ReloadRenderQualityAsync()
+        {
+            lock (_gate) { _cache?.Clear(); }
+            if (!IsOpen) return;
+
+            if (_displayMode == PdfDisplayMode.ContinuousScroll)
+                await ResetStripAsync(CancellationToken.None).ConfigureAwait(false);
+            else
+                await RenderCurrentPageAsync(CancellationToken.None).ConfigureAwait(false);
+
+            await SyncVisiblePagesAsync(CancellationToken.None).ConfigureAwait(false);
         }
 
         /// <summary>把「背景 + 墨迹」导出为新的 PDF：完整文档，从第一页到末页。</summary>
@@ -1083,6 +1279,58 @@ namespace PdfReader
             }
 
             return _composition.ExportWithInkAsync(outputPath, 0u, cancellationToken);
+        }
+
+        /// <summary>
+        /// 进入白板模式：先把当前画布墨迹归位到当前页缓存（宿主随后会备份并清空画布），
+        /// 再隐藏 PDF 背景层并注销画布手势接管，让白板完全回归宿主自己的行为。
+        /// 不能移除背景层：宿主的 RemoveBackgroundLayer 会清空按页墨迹缓存（PDF 批注丢失）。
+        /// </summary>
+        public void SuspendForWhiteboard()
+        {
+            if (!IsOpen) return;
+
+            // 事件在宿主清空画布之前触发，此处同步归位墨迹到页缓存；
+            // SetPluginVisiblePagesAsync 在 UI 线程内联执行，事件回调返回前即完成。
+            try { _ = SyncVisiblePagesAsync(CancellationToken.None); }
+            catch (Exception ex) { _logError?.Invoke("进入白板前墨迹归位失败", ex); }
+
+            // 白板期间画布上的笔迹不再属于 PDF，注销手势接管避免双指缩放误伤白板墨迹。
+            try { _composition.SetCanvasGestureHandler(null); }
+            catch (Exception ex) { _logError?.Invoke("进入白板注销手势接管失败", ex); }
+
+            var view = _backgroundView;
+            if (view == null) return;
+
+            if (view.Dispatcher.CheckAccess()) view.Visibility = Visibility.Collapsed;
+            else view.Dispatcher.Invoke(() => view.Visibility = Visibility.Collapsed);
+        }
+
+        /// <summary>
+        /// 退出白板模式：恢复 PDF 背景显示、重新接管手势、按当前页恢复墨迹，
+        /// 并重放一次放映模式以救回宿主不再自动恢复的翻页条（见 <see cref="ReplayPresentationAsync"/>）。
+        /// 必须推迟到宿主收尾流程（SaveStrokes/ClearStrokes/RestoreStrokes）完成之后执行：
+        /// 事件触发时白板笔迹还在画布上，立刻同步会把它们误存进 PDF 页缓存；
+        /// 宿主恢复「进入白板前」的主备份墨迹后画布已干净，此时同步才正确。
+        /// </summary>
+        public void ResumeAfterWhiteboard()
+        {
+            var view = _backgroundView;
+            if (view == null || !IsOpen) return;
+
+            view.Dispatcher.BeginInvoke(new Action(() =>
+            {
+                if (!IsOpen || !ReferenceEquals(view, _backgroundView)) return;
+
+                view.Visibility = Visibility.Visible;
+
+                try { _composition.SetCanvasGestureHandler(this); }
+                catch (Exception ex) { _logError?.Invoke("退出白板恢复手势接管失败", ex); }
+
+                SyncVisiblePagesAsync();
+
+                _ = ReplayPresentationAsync();
+            }), System.Windows.Threading.DispatcherPriority.Loaded);
         }
 
         /// <summary>关闭文档并移除背景层。</summary>

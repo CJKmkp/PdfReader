@@ -15,6 +15,9 @@ namespace PdfReader.Views
         /// <summary>RefreshState 代码赋值 ComboBox 选中项时抑制事件触发，避免循环。</summary>
         private bool _suppressModeEvent;
 
+        /// <summary>质量档位下拉的同类抑制标志。</summary>
+        private bool _suppressQualityEvent;
+
         internal ReaderPopupContent(PdfReaderPlugin plugin)
         {
             InitializeComponent();
@@ -42,6 +45,11 @@ namespace PdfReader.Views
             DisplayModeCombo.Items.Add(new ComboBoxItem { Content = Strings.SinglePage, Tag = PdfDisplayMode.SinglePage });
             DisplayModeCombo.Items.Add(new ComboBoxItem { Content = Strings.DoublePage, Tag = PdfDisplayMode.DoublePage });
             DisplayModeCombo.Items.Add(new ComboBoxItem { Content = Strings.ContinuousScroll, Tag = PdfDisplayMode.ContinuousScroll });
+
+            QualityCombo.Items.Clear();
+            QualityCombo.Items.Add(new ComboBoxItem { Content = Strings.QualityPerformance, Tag = RenderQualityMode.Performance });
+            QualityCombo.Items.Add(new ComboBoxItem { Content = Strings.QualityBalanced, Tag = RenderQualityMode.Balanced });
+            QualityCombo.Items.Add(new ComboBoxItem { Content = Strings.QualityQuality, Tag = RenderQualityMode.Quality });
         }
 
         /// <summary>按当前会话状态刷新页码与按钮可用性。</summary>
@@ -52,7 +60,6 @@ namespace PdfReader.Views
             int total = _plugin?.PageCount ?? 0;
 
             PageText.Text = open ? string.Format(Strings.PageOfFormat, page + 1, total) : "—";
-            StatusText.Text = _plugin?.StatusText ?? string.Empty;
 
             double scale = _plugin?.ViewScale ?? 1.0;
             ZoomText.Text = open ? string.Format(Strings.ZoomFormat, (int)Math.Round(scale * 100)) : "—";
@@ -79,6 +86,22 @@ namespace PdfReader.Views
                     return;
                 }
             }
+
+            // 同步渲染质量档位（设置页改过的话弹窗跟着变）。
+            var quality = _plugin?.Config?.RenderQuality ?? RenderQualityMode.Balanced;
+            foreach (var obj in QualityCombo.Items)
+            {
+                if (obj is ComboBoxItem item && item.Tag is RenderQualityMode q && q == quality)
+                {
+                    if (!ReferenceEquals(QualityCombo.SelectedItem, item))
+                    {
+                        _suppressQualityEvent = true;
+                        QualityCombo.SelectedItem = item;
+                        _suppressQualityEvent = false;
+                    }
+                    return;
+                }
+            }
         }
 
         private async void DisplayModeCombo_SelectionChanged(object sender, SelectionChangedEventArgs e)
@@ -86,6 +109,13 @@ namespace PdfReader.Views
             if (_suppressModeEvent || _plugin == null) return;
             if (DisplayModeCombo.SelectedItem is ComboBoxItem item && item.Tag is PdfDisplayMode mode)
                 await SafeRun(() => _plugin.SetDisplayModeAsync(mode));
+        }
+
+        private void QualityCombo_SelectionChanged(object sender, SelectionChangedEventArgs e)
+        {
+            if (_suppressQualityEvent || _plugin == null) return;
+            if (QualityCombo.SelectedItem is ComboBoxItem item && item.Tag is RenderQualityMode mode)
+                _plugin.SetRenderQuality(mode);
         }
 
         private async void OpenButton_Click(object sender, RoutedEventArgs e)
