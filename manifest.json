@@ -1,7 +1,7 @@
 {
   "Id": "com.icc.pdf-reader",
   "Name": "PDF 阅读器",
-  "Version": "2.1.0",
+  "Version": "2.2.0",
   "Description": "把 PDF 加载为画布背景，直接用宿主墨迹工具批注：翻页自动切换每页墨迹，可导出「页面 + 墨迹」为新的 PDF。渲染基于系统 Windows.Data.Pdf，无第三方依赖。",
   "Author": "ICC-CE",
   "EntranceAssembly": "PdfReader.dll",
