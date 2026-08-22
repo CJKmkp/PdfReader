@@ -14,7 +14,7 @@ permissions:
 
 jobs:
   build:
-    uses: InkCanvasForClass/community/.github/workflows/plugin-build.yml@net6
+    uses: InkCanvasForClass/community/.github/workflows/plugin-build.yml@net10
     with:
       project: PdfReader.csproj
       plugin_id: com.icc.pdf-reader
