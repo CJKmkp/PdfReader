@@ -65,7 +65,7 @@ dotnet build "PdfReader.csproj" -c Debug -p:Platform=x64
 ## 本地调试
 
 ```powershell
-.\build-and-run.ps1 -HostDir "e:\ICC CE\ICC CE main\community\Ink Canvas\bin\Debug\x64\net6.0-windows10.0.19041.0"
+.\build-and-run.ps1 -HostDir "e:\ICC CE\ICC CE main\community\Ink Canvas\bin\Debug\x64\net10.0-windows10.0.19041.0"
 ```
 
 ## 注意事项

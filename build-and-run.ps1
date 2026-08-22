@@ -1,5 +1,5 @@
 # 构建 PdfReader 插件并把产物复制到宿主插件目录，便于本地调试。
-# 用法： .\build-and-run.ps1 [-HostDir "e:\ICC CE\ICC CE main\community\bin\x64\Debug\net6.0-windows10.0.19041.0"]
+# 用法： .\build-and-run.ps1 [-HostDir "e:\ICC CE\ICC CE main\community\Ink Canvas\bin\Debug\x64\net10.0-windows10.0.19041.0"]
 param(
     [string]$Configuration = "Debug",
     [string]$Platform = "x64",
@@ -14,9 +14,9 @@ Write-Host "构建 $Configuration|$Platform ..."
 dotnet build $csproj -c $Configuration -p:Platform=$Platform
 if ($LASTEXITCODE -ne 0) { throw "构建失败。" }
 
-$outDir = Join-Path $root "bin\$Platform\$Configuration\net6.0-windows10.0.19041.0"
+$outDir = Join-Path $root "bin\$Platform\$Configuration\net10.0-windows10.0.19041.0"
 if (-not (Test-Path $outDir)) {
-    $outDir = Join-Path $root "bin\$Configuration\net6.0-windows10.0.19041.0"
+    $outDir = Join-Path $root "bin\$Configuration\net10.0-windows10.0.19041.0"
 }
 
 if ([string]::IsNullOrWhiteSpace($HostDir)) {

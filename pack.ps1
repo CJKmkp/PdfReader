@@ -14,9 +14,9 @@ Write-Host "构建 $Configuration|$Platform ..."
 dotnet build $csproj -c $Configuration -p:Platform=$Platform
 if ($LASTEXITCODE -ne 0) { throw "构建失败，已中止打包。" }
 
-$outDir = Join-Path $root "bin\$Platform\$Configuration\net6.0-windows10.0.19041.0"
+$outDir = Join-Path $root "bin\$Platform\$Configuration\net10.0-windows10.0.19041.0"
 if (-not (Test-Path $outDir)) {
-    $outDir = Join-Path $root "bin\$Configuration\net6.0-windows10.0.19041.0"
+    $outDir = Join-Path $root "bin\$Configuration\net10.0-windows10.0.19041.0"
 }
 
 $manifest = Join-Path $root "manifest.json"
