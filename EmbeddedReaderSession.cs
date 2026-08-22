@@ -33,6 +33,9 @@ namespace PdfReader
         private readonly ReaderConfig _config;
         private readonly Action<string, Exception> _logError;
 
+        /// <summary>info 级日志回调（宿主插件日志），用于模式切换/同步等非错误诊断。</summary>
+        private readonly Action<string> _logInfo;
+
         private readonly object _gate = new object();
         private PdfDocumentSession _document;
         private PageRenderCache _cache;
@@ -99,12 +102,13 @@ namespace PdfReader
 
         public EmbeddedReaderSession(ICanvasCompositionService composition,
             IPresentationSourceService presentation, ReaderConfig config,
-            Action<string, Exception> logError)
+            Action<string, Exception> logError, Action<string> logInfo = null)
         {
             _composition = composition ?? throw new ArgumentNullException(nameof(composition));
             _presentation = presentation;
             _config = config ?? new ReaderConfig();
             _logError = logError;
+            _logInfo = logInfo;
             _cache = new PageRenderCache(8, _config.CacheBudgetBytes);
         }
 
@@ -239,7 +243,7 @@ namespace PdfReader
         /// <summary>切换展示模式，重排背景层并恢复墨迹。</summary>
         public async Task SetDisplayModeAsync(PdfDisplayMode mode, CancellationToken cancellationToken)
         {
-            _logError?.Invoke($"SetDisplayMode 请求={mode} 当前={_displayMode} IsOpen={IsOpen}", null);
+            _logInfo?.Invoke($"SetDisplayMode 请求={mode} 当前={_displayMode} IsOpen={IsOpen}");
             if (_displayMode == mode) return;
 
             var view = _backgroundView;
@@ -264,7 +268,7 @@ namespace PdfReader
                 else await view.Dispatcher.InvokeAsync(() => view.SetDisplayMode(mode));
 
                 await ApplyInitialDisplayAsync(cancellationToken).ConfigureAwait(false);
-                _logError?.Invoke($"SetDisplayMode 完成={mode}", null);
+                _logInfo?.Invoke($"SetDisplayMode 完成={mode}");
             }
             finally
             {
@@ -1026,9 +1030,9 @@ namespace PdfReader
                 else
                     pages = view.GetPagerVisiblePageRects(CurrentPage);
 
-                // 诊断：确认滚动模式可见页同步是否被调用。
-                _logError?.Invoke($"SyncVisiblePages 模式={_displayMode} 页数={pages?.Count ?? -1} " +
-                    $"scrollOffset={view.ScrollOffset:F1} stripH={view.StripHeight:F1} viewH={view.ActualHeight:F1}", null);
+                // 诊断：确认滚动模式可见页同步是否被调用（info 级）。
+                _logInfo?.Invoke($"SyncVisiblePages 模式={_displayMode} 页数={pages?.Count ?? -1} " +
+                    $"scrollOffset={view.ScrollOffset:F1} stripH={view.StripHeight:F1} viewH={view.ActualHeight:F1}");
 
                 if (pages == null || pages.Count == 0) return;
 

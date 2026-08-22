@@ -21,8 +21,6 @@
                     <TextBlock x:Name="HeaderText" FontSize="14" FontWeight="SemiBold"/>
                     <TextBlock x:Name="IntroText" TextWrapping="Wrap" Opacity="0.8"
                                Foreground="{DynamicResource TextFillColorSecondaryBrush}"/>
-                    <Button x:Name="OpenNowButton" Padding="12,6" HorizontalAlignment="Left"
-                            Click="OpenNowButton_Click"/>
                 </ikw:SimpleStackPanel>
             </Border>
 
@@ -56,6 +54,23 @@
                                     VerticalAlignment="Center" ValueChanged="CacheBudgetSlider_ValueChanged"/>
                         </StackPanel>
                     </DockPanel>
+                </ikw:SimpleStackPanel>
+            </Border>
+
+            <!-- 文件关联 -->
+            <Border CornerRadius="8" Padding="16"
+                    Background="{DynamicResource CardBackgroundFillColorDefaultBrush}"
+                    BorderBrush="{DynamicResource CardStrokeColorDefaultBrush}" BorderThickness="1">
+                <ikw:SimpleStackPanel Spacing="10">
+                    <TextBlock x:Name="AssocHeader" FontSize="14" FontWeight="SemiBold"/>
+                    <TextBlock x:Name="AssocStatus" TextWrapping="Wrap" Opacity="0.8"
+                               Foreground="{DynamicResource TextFillColorSecondaryBrush}"/>
+                    <StackPanel Orientation="Horizontal">
+                        <Button x:Name="AssocRegisterButton" Padding="12,6" Margin="0,0,8,0"
+                                Click="AssocRegisterButton_Click"/>
+                        <Button x:Name="AssocUnregisterButton" Padding="12,6"
+                                Click="AssocUnregisterButton_Click"/>
+                    </StackPanel>
                 </ikw:SimpleStackPanel>
             </Border>
 

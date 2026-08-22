@@ -1,7 +1,7 @@
 <Project Sdk="Microsoft.NET.Sdk">
 
   <PropertyGroup>
-    <TargetFramework>net6.0-windows10.0.19041.0</TargetFramework>
+    <TargetFramework>net10.0-windows10.0.19041.0</TargetFramework>
     <UseWPF>true</UseWPF>
     <ImplicitUsings>disable</ImplicitUsings>
     <Nullable>disable</Nullable>
@@ -23,8 +23,9 @@
 
   <ItemGroup>
     <!-- 1.7.19.9-gf5eb6eac26 起 IPluginHost 提供 RegisterBoardToolbarItem（白板工具栏注册）。
+         1.8.0-gb765774731 起 SDK 提供插件 URI 与归属插件文件关联路由。
          运行期 SDK 程序集由宿主提供（ExcludeAssets=runtime），此处仅为编译期 API。 -->
-    <PackageReference Include="InkCanvas.PluginSdk" Version="1.7.19.9-gf5eb6eac26" ExcludeAssets="runtime" />
+    <PackageReference Include="InkCanvas.PluginSdk" Version="1.8.0-gb765774731" ExcludeAssets="runtime" />
     <PackageReference Include="InkCanvas.Controls" Version="1.7.19.9-g9d061df0fc" ExcludeAssets="runtime" />
   </ItemGroup>
 

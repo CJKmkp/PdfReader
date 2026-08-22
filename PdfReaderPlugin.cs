@@ -43,6 +43,13 @@ namespace PdfReader
         private IEventService _eventService;
         private IWindowService _windowService;
         private ICanvasInkService _canvasInkService;
+
+        /// <summary>URI 深链接服务（文件关联双击 .pdf → icc://plugin/com.icc.pdf-reader/open）。</summary>
+        private IPluginUriService _uriService;
+
+        /// <summary>文件关联服务（设置页注册/注销/查看 .pdf 关联）。</summary>
+        private IFileAssociationService _association;
+
         private EmbeddedReaderSession _session;
 
         /// <summary>当前是否处于白板模式（由 WhiteboardModeChanged 事件维护）。</summary>
@@ -125,6 +132,19 @@ namespace PdfReader
                 _isWhiteboardMode = _windowService?.IsWhiteboardMode ?? false;
             }
             catch { _windowService = null; }
+
+            // 文件关联深链接：宿主收到 .pdf 打开请求时派发 icc://plugin/<id>/open，这里接收并打开文档。
+            try { _uriService = GetService<IPluginUriService>(); }
+            catch { _uriService = null; }
+            if (_uriService != null)
+            {
+                try { _uriService.RegisterHandler("open", OnOpenDocumentUri); }
+                catch (Exception ex) { LogError("注册 PDF 打开深链接失败", ex); }
+            }
+
+            // 文件关联服务（设置页注册/注销 .pdf 关联用；宿主较旧为 null 时设置页提示不可用）。
+            try { _association = GetService<IFileAssociationService>(); }
+            catch { _association = null; }
 
             RegisterToolbarButton(host);
             Log("工具栏组件「" + Strings.PluginName + "」已注册。");
@@ -367,7 +387,7 @@ namespace PdfReader
                 {
                     if (_session == null)
                     {
-                        _session = new EmbeddedReaderSession(_composition, _presentation, _config, LogError);
+                        _session = new EmbeddedReaderSession(_composition, _presentation, _config, LogError, Log);
                         _session.PageChanged += Session_PageChanged;
                         _session.Closed += Session_Closed;
                         _session.ViewTransformChanged += Session_ViewTransformChanged;
@@ -612,6 +632,94 @@ namespace PdfReader
             session.Close();
             SetStatus(Strings.ClosedNotice);
             AfterPdfClosed();
+        }
+
+        /// <summary>PDF 文件关联的 ProgId（HKCU\Software\Classes）。</summary>
+        private const string PdfAssociationProgId = "ICCCommunity.PDF.Reader";
+
+        /// <summary>处理 icc://plugin/com.icc.pdf-reader/open?path=&lt;urlencoded&gt;（文件关联双击 .pdf 触发）。</summary>
+        private bool OnOpenDocumentUri(PluginUriRequest request)
+        {
+            try
+            {
+                if (request?.Query != null
+                    && request.Query.TryGetValue("path", out string path)
+                    && !string.IsNullOrWhiteSpace(path)
+                    && File.Exists(path))
+                {
+                    // 深链接在 UI 线程回调；打开是异步流程，异常已在 OpenDocumentAsync 内收敛。
+                    _ = OpenDocumentAsync(path, 0);
+                    return true;
+                }
+            }
+            catch (Exception ex)
+            {
+                LogError("处理 PDF 打开深链接失败", ex);
+            }
+            return false;
+        }
+
+        internal (bool registered, string progId) GetAssociationStatus()
+        {
+            if (_association == null) return (false, PdfAssociationProgId);
+            try
+            {
+                bool ok = _association.IsRegistered(".pdf");
+                return (ok, PdfAssociationProgId);
+            }
+            catch (Exception ex)
+            {
+                LogError("检查 PDF 文件关联状态失败", ex);
+                return (false, PdfAssociationProgId);
+            }
+        }
+
+        /// <summary>该插件是否拿到宿主的文件关联服务（设置页据此显示可用性并禁用按钮）。</summary>
+        internal bool IsAssociationSupported => _association != null;
+
+        internal bool RegisterPdfAssociation()
+        {
+            if (_association == null)
+            {
+                ShowError(Strings.AssocUnavailable);
+                return false;
+            }
+            try
+            {
+                // 传插件自身 ID：宿主据此把双击打开的 .pdf 文件派发回本插件的 "open" 处理器。
+                bool ok = _association.Register(".pdf", PdfAssociationProgId, Strings.AssocDescription, pluginId: Id);
+                if (ok) Notify(Strings.AssocRegistered, NotificationLevel.Success);
+                else ShowError(Strings.AssocRegisterFailed);
+                return ok;
+            }
+            catch (Exception ex)
+            {
+                LogError("注册 PDF 文件关联失败", ex);
+                ShowError(Strings.AssocRegisterFailed);
+                return false;
+            }
+        }
+
+        internal bool UnregisterPdfAssociation()
+        {
+            if (_association == null)
+            {
+                ShowError(Strings.AssocUnavailable);
+                return false;
+            }
+            try
+            {
+                bool ok = _association.Unregister(".pdf");
+                if (ok) Notify(Strings.AssocUnregistered, NotificationLevel.Success);
+                else ShowError(Strings.AssocUnregisterFailed);
+                return ok;
+            }
+            catch (Exception ex)
+            {
+                LogError("注销 PDF 文件关联失败", ex);
+                ShowError(Strings.AssocUnregisterFailed);
+                return false;
+            }
         }
 
         internal void SaveConfig()

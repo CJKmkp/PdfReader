@@ -21,17 +21,21 @@ namespace PdfReader.Views
             _config = plugin?.Config ?? new ReaderConfig();
             ApplyLocalizedText();
             LoadFromConfig();
+            RefreshAssociationStatus();
         }
 
         private void ApplyLocalizedText()
         {
             HeaderText.Text = Strings.SettingsHeader;
             IntroText.Text = Strings.SettingsIntro;
-            OpenNowButton.Content = Strings.SettingsOpenNow;
 
             RenderScaleLabel.Text = Strings.SettingsRenderScale;
             RememberLabel.Text = Strings.SettingsRememberLast;
             CacheBudgetLabel.Text = Strings.SettingsCacheBudget;
+
+            AssocHeader.Text = Strings.AssocSectionHeader;
+            AssocRegisterButton.Content = Strings.AssocRegister;
+            AssocUnregisterButton.Content = Strings.AssocUnregister;
 
             ShortcutsHeader.Text = Strings.SettingsShortcutsHeader;
             ShortcutsText.Text = Strings.SettingsShortcuts;
@@ -59,20 +63,11 @@ namespace PdfReader.Views
         private static string FormatScale(double scale)
             => scale.ToString("0.0", CultureInfo.CurrentCulture) + "×";
 
-        private async void OpenNowButton_Click(object sender, RoutedEventArgs e)
-        {
-            if (_plugin == null) return;
-
-            IsEnabled = false;
-            try { await _plugin.PickAndOpenAsync(); }
-            finally { IsEnabled = true; }
-        }
-
         private void RenderScaleSlider_ValueChanged(object sender, RoutedPropertyChangedEventArgs<double> e)
         {
             if (RenderScaleValue != null)
                 RenderScaleValue.Text = FormatScale(e.NewValue);
-            if (_loading) return;
+            if (_loading || _config == null) return;
 
             _config.RenderScale = e.NewValue;
             _plugin?.SaveConfig();
@@ -90,10 +85,46 @@ namespace PdfReader.Views
             int mb = (int)System.Math.Round(e.NewValue);
             if (CacheBudgetValue != null)
                 CacheBudgetValue.Text = mb.ToString(CultureInfo.CurrentCulture);
-            if (_loading) return;
+            if (_loading || _config == null) return;
 
             _config.CacheBudgetMb = mb;
             _plugin?.SaveConfig();
+        }
+
+        private void AssocRegisterButton_Click(object sender, RoutedEventArgs e)
+        {
+            if (_plugin == null) return;
+            IsEnabled = false;
+            try { _plugin.RegisterPdfAssociation(); }
+            finally { IsEnabled = true; RefreshAssociationStatus(); }
+        }
+
+        private void AssocUnregisterButton_Click(object sender, RoutedEventArgs e)
+        {
+            if (_plugin == null) return;
+            IsEnabled = false;
+            try { _plugin.UnregisterPdfAssociation(); }
+            finally { IsEnabled = true; RefreshAssociationStatus(); }
+        }
+
+        private void RefreshAssociationStatus()
+        {
+            if (_plugin == null || AssocStatus == null) return;
+
+            if (!_plugin.IsAssociationSupported)
+            {
+                AssocStatus.Text = Strings.AssocStatusUnavailable;
+                AssocRegisterButton.IsEnabled = false;
+                AssocUnregisterButton.IsEnabled = false;
+                return;
+            }
+
+            var (registered, progId) = _plugin.GetAssociationStatus();
+            AssocStatus.Text = registered
+                ? string.Format(Strings.AssocStatusRegisteredFormat, progId)
+                : Strings.AssocStatusUnregistered;
+            AssocRegisterButton.IsEnabled = true;
+            AssocUnregisterButton.IsEnabled = true;
         }
     }
 }

@@ -92,7 +92,6 @@ namespace PdfReader
         public static string SettingsIntro => IsEnglish
             ? "Add the PDF button from the toolbar component library, then click it to load a PDF as the canvas background. Ink is drawn with the host's own tools and is remembered per page; export writes the pages together with the ink into a new PDF."
             : "在工具栏组件库中添加「PDF」按钮，点击即可把 PDF 加载为画布背景。批注使用宿主自带的墨迹工具，按页自动记忆；导出会把页面与墨迹一起写入新的 PDF。";
-        public static string SettingsOpenNow => IsEnglish ? "Open PDF" : "打开 PDF";
         public static string SettingsRenderScale => IsEnglish ? "Render scale" : "渲染倍率";
         public static string QualityPerformance => IsEnglish ? "Performance" : "性能";
         public static string QualityBalanced => IsEnglish ? "Balanced" : "均衡";
@@ -112,5 +111,41 @@ namespace PdfReader
         public static string SettingsNotes => IsEnglish
             ? "• The PDF sits below the host ink canvas, so all existing pen tools work on it.\n• Turning pages swaps the ink: each page keeps its own strokes.\n• Zoom keeps the ink glued to the page; the reset button restores 100%.\n• Encrypted PDFs are not supported.\n• A higher render scale looks sharper but uses more memory."
             : "• PDF 位于宿主墨迹画布下方，因此所有既有笔工具都能直接用。\n• 翻页会切换墨迹：每页各自保留自己的笔迹。\n• 缩放时墨迹始终贴合页面，重置按钮可恢复到 100%。\n• 不支持加密 PDF。\n• 渲染倍率越高越清晰，但内存占用也越大。";
+
+        // 设置页 · 文件关联
+        public static string AssocSectionHeader => IsEnglish ? "Open PDF with Ink Canvas" : "用 ICC 打开 .pdf";
+        public static string AssocStatusRegisteredFormat => IsEnglish
+            ? "Registered: double-clicking a .pdf opens it in Ink Canvas ({0})."
+            : "已关联：双击 .pdf 会用 ICC 打开（{0}）。";
+        public static string AssocStatusUnregistered => IsEnglish
+            ? "Not registered: double-clicking a .pdf keeps the current behavior."
+            : "未关联：双击 .pdf 保持当前行为。";
+        public static string AssocStatusUnavailable => IsEnglish
+            ? "File association is not supported by this host build."
+            : "当前宿主版本不支持文件关联。";
+        public static string AssocRegister => IsEnglish ? "Register" : "注册关联";
+        public static string AssocUnregister => IsEnglish ? "Unregister" : "注销关联";
+        public static string AssocRegisterDesc => IsEnglish
+            ? "Associate the .pdf extension (current user only, no admin rights needed). Double-clicking a PDF then opens it in Ink Canvas."
+            : "为 .pdf 扩展名建立关联（仅当前用户，无需管理员权限）。此后双击 PDF 会用 ICC 打开。";
+        public static string AssocUnregisterDesc => IsEnglish
+            ? "Remove the .pdf association registered by this plugin."
+            : "移除本插件注册的 .pdf 关联。";
+        public static string AssocDescription => IsEnglish ? "PDF Document (Ink Canvas)" : "PDF 文档（ICC）";
+        public static string AssocRegistered => IsEnglish
+            ? "PDF association registered. Double-click a .pdf to open it in Ink Canvas now."
+            : "已注册 .pdf 关联，现在双击 PDF 即可用 ICC 打开。";
+        public static string AssocUnregistered => IsEnglish
+            ? "PDF association removed."
+            : "已注销 .pdf 关联。";
+        public static string AssocRegisterFailed => IsEnglish
+            ? "Failed to register the .pdf association."
+            : "注册 .pdf 关联失败。";
+        public static string AssocUnregisterFailed => IsEnglish
+            ? "Failed to remove the .pdf association."
+            : "注销 .pdf 关联失败。";
+        public static string AssocUnavailable => IsEnglish
+            ? "File association is not supported by this host build."
+            : "当前宿主版本不支持文件关联。";
     }
 }
