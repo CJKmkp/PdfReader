@@ -39,11 +39,37 @@ internal static class Program
         string root = Path.Combine(Path.GetTempPath(), "PdfReaderContinuous_" + Guid.NewGuid().ToString("N")); Directory.CreateDirectory(root);
         try
         {
-            ConfigTests(root); LayoutTests(); SessionTests(root);
+            WindowStateTests(); ConfigTests(root); LayoutTests(); SessionTests(root);
             Console.WriteLine($"PASS: {_checks} continuous PDF checks"); return 0;
         }
         catch (Exception ex) { Console.Error.WriteLine(ex); return 1; }
         finally { app.Shutdown(); }
+    }
+
+    private static void WindowStateTests()
+    {
+        bool fullscreen = false;
+        int mouseCount = 0;
+        var changes = new List<bool>();
+        var state = new ReaderWindowState(() => fullscreen,
+            value => { fullscreen = value; changes.Add(value); },
+            () => { Check(!fullscreen, "Mouse selected before restoring desktop window"); mouseCount++; });
+        state.End(true);
+        Check(mouseCount == 0, "Closing an unused reader changed the user's tool");
+        state.Begin(); state.Show(); state.Begin(); state.Show(); state.End(true); state.End(true);
+        Check(!fullscreen && mouseCount == 1, "Repeated opens overwrote the original window state");
+        state.Begin(); state.End(false);
+        Check(mouseCount == 1, "Failed open changed the user's tool");
+        fullscreen = true;
+        var existingFullscreen = new ReaderWindowState(() => fullscreen, value => fullscreen = value, () => mouseCount++);
+        existingFullscreen.Begin(); existingFullscreen.Show(); existingFullscreen.End(false);
+        Check(fullscreen, "Reader restored a fullscreen window to the wrong state");
+        var failingRestore = new ReaderWindowState(() => false,
+            _ => throw new InvalidOperationException("restore fixture"), () => mouseCount++);
+        failingRestore.Begin();
+        try { failingRestore.End(true); } catch (InvalidOperationException) { }
+        Check(mouseCount == 2, "Window restore failure prevented leaving annotation mode");
+        Check(changes.SequenceEqual(new[] { true, true, false, false }), "Unexpected fullscreen lifecycle");
     }
 
     private static void ConfigTests(string root)

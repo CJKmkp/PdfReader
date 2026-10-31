@@ -51,18 +51,13 @@ namespace PdfReader
         private IFileAssociationService _association;
 
         private EmbeddedReaderSession _session;
+        private ReaderWindowState _readerWindowState;
 
         /// <summary>当前是否处于白板模式（由 WhiteboardModeChanged 事件维护）。</summary>
         private bool _isWhiteboardMode;
 
         /// <summary>当前是否笔类模式（笔/荧光笔/橡皮/选择）；false = 纯鼠标模式。默认按笔处理更安全。</summary>
         private bool _isPenMode = true;
-
-        /// <summary>本次 PDF 是从白板里打开的：关闭后要回到白板。</summary>
-        private bool _openedFromWhiteboard;
-
-        /// <summary>打开流程中我们自己退出白板的标志，避免误清 _openedFromWhiteboard。</summary>
-        private bool _exitingWhiteboardForOpen;
 
         /// <summary>白板工具栏按钮承载的弹窗（关闭 PDF 时一并收起）。</summary>
         private System.Windows.Controls.Primitives.Popup _boardPopup;
@@ -368,14 +363,11 @@ namespace PdfReader
             if (dialog.ShowDialog() != true) return;
 
             // 白板模式下打开 PDF：先退出白板，让 PDF 正常成为画布背景；
-            // 关闭 PDF 后由 AfterPdfClosed 回到白板。
+            // 关闭 PDF 后切换到桌面鼠标模式。
             if (_isWhiteboardMode && _canvasInkService != null)
             {
-                _exitingWhiteboardForOpen = true;
                 try { _canvasInkService.ExitWhiteboard(); }
                 catch (Exception ex) { LogError("打开 PDF 前退出白板失败", ex); }
-                finally { _exitingWhiteboardForOpen = false; }
-                _openedFromWhiteboard = true;
             }
 
             await OpenDocumentAsync(dialog.FileName, 0).ConfigureAwait(false);
@@ -385,6 +377,14 @@ namespace PdfReader
         {
             if (!EnsureUsable()) return;
 
+            var windowState = await Application.Current.Dispatcher.InvokeAsync(() =>
+            {
+                _readerWindowState ??= new ReaderWindowState(
+                    () => _windowService?.IsFullscreen ?? false,
+                    value => _windowService?.SetFullscreen(value), SelectDesktopMouse);
+                _readerWindowState.Begin();
+                return _readerWindowState;
+            });
             SetStatus(Strings.Loading);
             try
             {
@@ -402,6 +402,11 @@ namespace PdfReader
                 }
 
                 await session.OpenAsync(path, initialPage, CancellationToken.None).ConfigureAwait(false);
+                await Application.Current.Dispatcher.InvokeAsync(() =>
+                {
+                    if (ReferenceEquals(_readerWindowState, windowState) && session.IsOpen)
+                        windowState.Show();
+                });
 
                 // 打开 PDF 后自动开启双指缩放/移动：把当前的笔模式同步给会话（单指平移门控用）。
                 session.IsPenMode = _isPenMode;
@@ -415,14 +420,17 @@ namespace PdfReader
             }
             catch (FileNotFoundException)
             {
+                RestoreWindowAfterFailedOpen();
                 ShowError(Strings.ErrorFileNotFound);
             }
             catch (InvalidOperationException ex)
             {
+                RestoreWindowAfterFailedOpen();
                 ShowError(ex.Message);
             }
             catch (Exception ex)
             {
+                RestoreWindowAfterFailedOpen();
                 ShowError(IsLikelyFormatError(ex)
                     ? Strings.ErrorNotPdf
                     : string.Format(Strings.ErrorOpenFailedFormat, ex.Message));
@@ -447,23 +455,43 @@ namespace PdfReader
             AfterPdfClosed();
         }
 
-        /// <summary>PDF 关闭/放映结束后的收尾：收起板工具栏弹窗；从白板打开的则回到白板。</summary>
+        private void RestoreWindowAfterFailedOpen()
+        {
+            if (_session?.IsOpen == true) return;
+            Application.Current?.Dispatcher.Invoke(() => _readerWindowState?.End(false));
+        }
+
+        private void SelectDesktopMouse()
+        {
+            // Mouse is an additive host capability. Older SDKs only expose lasso Select.
+            if (Enum.TryParse<PluginInkTool>("Mouse", out var tool))
+                _canvasInkService?.SelectTool(tool);
+            else
+                Log("当前宿主不支持桌面鼠标工具，请更新 ICCCE。");
+        }
+
+        /// <summary>退出后恢复窗口并切到可操作桌面的鼠标模式。</summary>
         private void AfterPdfClosed()
         {
+            if (Application.Current != null && !Application.Current.Dispatcher.CheckAccess())
+            {
+                Application.Current.Dispatcher.BeginInvoke(new Action(AfterPdfClosed));
+                return;
+            }
             try
             {
                 if (_boardPopup != null) _boardPopup.IsOpen = false;
             }
             catch { }
 
-            if (!_openedFromWhiteboard) return;
-            _openedFromWhiteboard = false;
-
-            // 已在白板（用户中途手动进入）就不重复切换：宿主的 EnterWhiteboard 是取反切换。
-            if (_windowService == null || _isWhiteboardMode) return;
-
-            try { _windowService.EnterWhiteboard(); }
-            catch (Exception ex) { LogError("关闭 PDF 后回到白板失败", ex); }
+            // Queue after EndAsync so presentation cleanup cannot override the selected tool.
+            var windowState = _readerWindowState;
+            _readerWindowState = null;
+            Application.Current?.Dispatcher.BeginInvoke(new Action(() =>
+            {
+                try { windowState?.End(true); }
+                catch (Exception ex) { LogError("退出 PDF 后恢复窗口与鼠标模式失败", ex); }
+            }));
         }
 
         /// <summary>渲染质量档位变化：保存配置并让会话清缓存、按新档位重渲染当前视图。</summary>
@@ -506,10 +534,6 @@ namespace PdfReader
         private void OnWhiteboardModeChanged(bool isWhiteboardMode)
         {
             _isWhiteboardMode = isWhiteboardMode;
-
-            // 用户手动退出白板（非打开 PDF 触发的退出）：关闭 PDF 后不再自动回白板。
-            if (!isWhiteboardMode && !_exitingWhiteboardForOpen)
-                _openedFromWhiteboard = false;
 
             EmbeddedReaderSession session;
             lock (_gate) session = _session;
@@ -863,6 +887,7 @@ namespace PdfReader
                 try { session.ViewTransformChanged -= Session_ViewTransformChanged; } catch { }
                 try { session.Dispose(); } catch { }
             }
+            AfterPdfClosed();
         }
     }
 }
