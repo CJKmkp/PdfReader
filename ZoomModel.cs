@@ -12,16 +12,14 @@ namespace PdfReader
     /// <summary>渲染质量档位：决定每页位图的渲染倍率。</summary>
     internal enum RenderQualityMode
     {
-        /// <summary>性能：固定 2.0 倍（现状水平）。</summary>
+        /// <summary>性能：初始 2.0 倍，放大后按显示密度精化。</summary>
         Performance,
 
-        /// <summary>均衡：固定 3.0 倍。</summary>
+        /// <summary>均衡：初始 3.0 倍，放大后按显示密度精化。</summary>
         Balanced,
 
         /// <summary>
-        /// 质量：按视口计算到最大缩放（<see cref="MaxScale"/>，8×）下吃满显示密度，
-        /// 上限放宽到 <see cref="QualityMaxPixelDimension"/> / <see cref="QualityMaxPixelCount"/>
-        /// （常规屏幕与常见页面可完全覆盖，极端页面/极端屏仍由上限约束）。
+        /// 质量：按视口、当前缩放与 DPI 计算显示密度；内存预算与绝对像素上限共同约束。
         /// </summary>
         Quality
     }
@@ -51,6 +49,16 @@ namespace PdfReader
 
         /// <summary>渲染宽度按此粒度取整，避免连续缩放时每一像素都产生新的缓存条目。</summary>
         public const int WidthBucket = 64;
+
+        internal static int ComputeBudgetedRenderWidth(double density, double pageWidth, double pageHeight, long byteBudget)
+        {
+            int requested = ComputeQualityRenderWidth(density, pageWidth, pageHeight);
+            if (pageWidth <= 0 || pageHeight <= 0) return requested;
+            double pixels = Math.Max(1, byteBudget / 4);
+            int limit = (int)Math.Max(1, Math.Sqrt(pixels * pageWidth / pageHeight));
+            int width = Math.Min(requested, limit);
+            return width < WidthBucket ? width : width / WidthBucket * WidthBucket;
+        }
 
         private static readonly double[] ZoomSteps =
         {

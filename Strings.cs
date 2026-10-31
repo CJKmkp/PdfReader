@@ -97,8 +97,8 @@ namespace PdfReader
         public static string QualityBalanced => IsEnglish ? "Balanced" : "均衡";
         public static string QualityQuality => IsEnglish ? "Quality" : "质量";
         public static string QualityWarning => IsEnglish
-            ? "Quality mode renders pages at full resolution for the 8× maximum zoom. Memory usage is very high (a single page can take 100 MB – 1 GB). Consider raising the page cache budget; page turns on large documents will be slower."
-            : "质量模式会按最大缩放（8×）所需的完整分辨率渲染页面，内存占用很大（单页可达 100MB – 1GB）。建议调大页面缓存上限，大文档翻页会变慢。";
+            ? "Quality mode uses a higher starting resolution and refines enlarged pages within the cache budget. A larger cache can improve sharpness at high zoom."
+            : "质量模式使用更高的初始分辨率，放大后会在缓存预算内重新渲染。增加页面缓存可提升高倍放大的清晰度。";
         public static string SettingsRememberLast => IsEnglish
             ? "Reload the last document and page"
             : "重新打开时恢复上次的文档与页码";

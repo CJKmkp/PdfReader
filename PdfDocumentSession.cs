@@ -108,7 +108,7 @@ namespace PdfReader
                 {
                     var options = new PdfPageRenderOptions
                     {
-                        DestinationWidth = (uint)Math.Min(pixelWidth, ZoomModel.MaxPixelDimension)
+                        DestinationWidth = (uint)Math.Min(pixelWidth, ZoomModel.QualityMaxPixelDimension)
                     };
                     await page.RenderToStreamAsync(ras, options).AsTask(cancellationToken);
                     cancellationToken.ThrowIfCancellationRequested();

@@ -55,9 +55,17 @@ namespace PdfReader
 
             // Cached bitmaps and image sources are both bounded. In particular,
             // quality mode must not allocate a gigabyte for each offscreen page.
-            long pixelsPerPage = Math.Max(65536, _config.CacheBudgetBytes / (4 * Math.Max(1, pages.Count)));
+            var visibleSet = visible.ToHashSet();
+            if (visibleSet.Count == 0) visibleSet.Add(CurrentPage);
+            int neighbors = pages.Count - visibleSet.Count;
             var widths = pages.Select(page =>
             {
+                // Reserve most of the budget for pages on screen; prefetch must not
+                // force the visible page to remain blurry after zooming.
+                double share = visibleSet.Contains(page)
+                    ? (neighbors == 0 ? 1.0 : .8) / visibleSet.Count
+                    : .2 / Math.Max(1, neighbors);
+                long pixelsPerPage = Math.Max(65536, (long)(_config.CacheBudgetBytes * share / 4));
                 var size = document.GetPageSize(page);
                 int budgetWidth = (int)Math.Max(1, Math.Sqrt(pixelsPerPage * size.Width / Math.Max(1, size.Height)));
                 int requested = Math.Min(ComputeRenderWidth(document, page), budgetWidth);

@@ -39,7 +39,7 @@ internal static class Program
         string root = Path.Combine(Path.GetTempPath(), "PdfReaderContinuous_" + Guid.NewGuid().ToString("N")); Directory.CreateDirectory(root);
         try
         {
-            WindowStateTests(); ConfigTests(root); LayoutTests(); SessionTests(root);
+            WindowStateTests(); RenderBudgetTests(); NativeResolutionTests(root); ConfigTests(root); LayoutTests(); SessionTests(root);
             Console.WriteLine($"PASS: {_checks} continuous PDF checks"); return 0;
         }
         catch (Exception ex) { Console.Error.WriteLine(ex); return 1; }
@@ -70,6 +70,36 @@ internal static class Program
         try { failingRestore.End(true); } catch (InvalidOperationException) { }
         Check(mouseCount == 2, "Window restore failure prevented leaving annotation mode");
         Check(changes.SequenceEqual(new[] { true, true, false, false }), "Unexpected fullscreen lifecycle");
+    }
+
+    private static void RenderBudgetTests()
+    {
+        foreach (long budget in new[] { 32L << 20, 192L << 20 })
+        {
+            int normal = ZoomModel.ComputeBudgetedRenderWidth(2, 600, 800, budget);
+            int enlarged = ZoomModel.ComputeBudgetedRenderWidth(8, 600, 800, budget);
+            Check(enlarged > normal, "Zoomed resolution remained fixed");
+            Check((long)enlarged * Math.Ceiling(enlarged * 800.0 / 600) * 4 <= budget,
+                "Zoom refinement exceeded the pixel budget");
+        }
+    }
+
+    private static void NativeResolutionTests(string root)
+    {
+        string path = Path.Combine(root, "wide.pdf");
+        using (var pdf = new PdfDocument())
+        {
+            var page = pdf.AddPage();
+            page.Width = PdfSharp.Drawing.XUnit.FromPoint(4000);
+            page.Height = PdfSharp.Drawing.XUnit.FromPoint(400);
+            pdf.Save(path);
+        }
+        var opening = PdfDocumentSession.OpenAsync(path, CancellationToken.None);
+        Wait(opening);
+        using var document = opening.Result;
+        var rendering = document.RenderAsync(0, 5120, CancellationToken.None);
+        Wait(rendering);
+        Check(rendering.Result.PixelWidth == 5120, "Native PDF renderer silently capped high-resolution requests at 4096px");
     }
 
     private static void ConfigTests(string root)
@@ -210,6 +240,22 @@ internal static class Program
             var lastBitmap = (BitmapSource)view.GetStripPageImage(0).Source;
             Check(Math.Abs(lastBitmap.PixelWidth / (double)lastBitmap.PixelHeight - 400.0 / 900) < .001,
                 "A stale bitmap from the old document was attached to the new page");
+            foreach (var mode in new[] { PdfDisplayMode.ContinuousScroll, PdfDisplayMode.SinglePage, PdfDisplayMode.DoublePage })
+            {
+                Wait(session.ResetZoomAsync());
+                Wait(session.SetDisplayModeAsync(mode, CancellationToken.None)); Pump(240);
+                if (mode == PdfDisplayMode.ContinuousScroll) Wait(Field<Task>(session, "_stripRenderTask"));
+                BitmapSource Bitmap() => mode == PdfDisplayMode.ContinuousScroll
+                    ? (BitmapSource)view.GetStripPageImage(0).Source
+                    : (BitmapSource)((Image)view.FindName("LeftImage")).Source;
+                int baselineWidth = Bitmap().PixelWidth;
+                Check(session.ApplyTouchNavigation(2, new Vector(), 6, new Point(400, 300)), "Zoom fixture was rejected");
+                session.OnCanvasGestureCompleted(null); Pump(250);
+                if (mode == PdfDisplayMode.ContinuousScroll) Wait(Field<Task>(session, "_stripRenderTask"));
+                var timer = Stopwatch.StartNew();
+                while (Bitmap().PixelWidth <= baselineWidth && timer.ElapsedMilliseconds < 5000) Pump(30);
+                Check(Bitmap().PixelWidth > baselineWidth, $"{mode}: default performance mode did not refine the enlarged bitmap");
+            }
             session.Close(); Pump(250);
             Check(!composition.HasBackgroundLayer, "Closed PDF retained its background view");
             Check(errors.Count == 0, "Continuous reader logged failures: " + string.Join("\n", errors));
