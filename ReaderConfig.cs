@@ -1,6 +1,7 @@
 using System.IO;
 using System.Text.Json;
 using System.Text.Json.Serialization;
+using PdfReader.Views;
 
 namespace PdfReader
 {
@@ -10,6 +11,8 @@ namespace PdfReader
     /// </summary>
     internal sealed class ReaderConfig
     {
+        [JsonPropertyName("displayMode")]
+        public PdfDisplayMode DisplayMode { get; set; } = PdfDisplayMode.ContinuousScroll;
         /// <summary>
         /// 渲染质量档位：性能=固定 2.0 倍（默认，现状水平）；均衡=固定 3.0 倍；
         /// 质量=按视口算到最大缩放（8×）下吃满显示密度，上限放宽到 16384px/320MP。
@@ -110,6 +113,7 @@ namespace PdfReader
 
         private void Normalize()
         {
+            if (!System.Enum.IsDefined(DisplayMode)) DisplayMode = PdfDisplayMode.ContinuousScroll;
             RenderScale = NormalizedRenderScale;
             CacheBudgetMb = NormalizedCacheBudgetMb;
             if (LastPageIndex < 0) LastPageIndex = 0;

@@ -1,8 +1,8 @@
 {
   "Id": "com.icc.pdf-reader",
   "Name": "PDF 阅读器",
-  "Version": "2.3.0",
-  "Description": "把 PDF 加载为画布背景，直接用宿主墨迹工具批注：翻页自动切换每页墨迹，可导出「页面 + 墨迹」为新的 PDF。渲染基于系统 Windows.Data.Pdf，无第三方依赖。",
+  "Version": "2.3.1",
+  "Description": "PDF 连续阅读：支持滚轮滚动、选择模式触屏平移与缩放、批注模式双指跨页浏览；可见页按需渲染。使用宿主墨迹工具批注，并可导出含墨迹的 PDF。",
   "Author": "ICC-CE",
   "EntranceAssembly": "PdfReader.dll",
   "ApiVersion": "1.0.0",

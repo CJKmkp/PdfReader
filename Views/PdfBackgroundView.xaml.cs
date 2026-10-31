@@ -50,6 +50,9 @@ namespace PdfReader.Views
 
         /// <summary>长条里每页的源。</summary>
         private readonly List<ImageSource> _pageSources = new List<ImageSource>();
+        private readonly List<Size> _pageSizes = new List<Size>();
+        private readonly HashSet<int> _loadedStripPages = new();
+        internal int ResidentPageCount => _loadedStripPages.Count;
 
         /// <summary>页接缝的分隔线（低透明度灰色虚线），与页一一对应（第 i 条 = 第 i 页下边界）。</summary>
         private readonly List<Line> _pageSeparators = new List<Line>();
@@ -113,6 +116,17 @@ namespace PdfReader.Views
             _viewMatrix = matrix;
             // 矩阵已显式编码缩放锚点，ContentHostTransform 的 CenterX/CenterY 保持默认 (0,0)。
             ContentHostTransform.Matrix = matrix;
+        }
+
+        internal Matrix ConstrainDocumentView(Matrix matrix)
+        {
+            if (_mode != PdfDisplayMode.ContinuousScroll || StripHeight <= 0 || ActualHeight <= 0) return matrix;
+            double scale = matrix.M11;
+            double end = Math.Max(0, StripHeight - ActualHeight / scale);
+            matrix.OffsetY = Math.Clamp(matrix.OffsetY, (_scrollOffset - end) * scale, _scrollOffset * scale);
+            matrix.OffsetX = scale <= 1 ? ActualWidth * (1 - scale) / 2
+                : Math.Clamp(matrix.OffsetX, ActualWidth * (1 - scale), 0);
+            return matrix;
         }
 
         /// <summary>
@@ -281,8 +295,14 @@ namespace PdfReader.Views
         /// <summary>重置长条为指定页数（连续滚动用）。</summary>
         public void ResetStrip(int pageCount)
         {
+            if (_pageSizes.Count != pageCount)
+            {
+                _pageSizes.Clear();
+                for (int i = 0; i < pageCount; i++) _pageSizes.Add(new Size(612, 792));
+            }
             Strip.Children.Clear();
             _pageImages.Clear();
+            _loadedStripPages.Clear();
             _pageSources.Clear();
             _pageSeparators.Clear();
 
@@ -312,20 +332,43 @@ namespace PdfReader.Views
             RecomputeStripLayout();
         }
 
+        public void ResetStrip(IReadOnlyList<Size> pageSizes)
+        {
+            _pageSizes.Clear();
+            foreach (var size in pageSizes)
+                _pageSizes.Add(size.Width > 0 && size.Height > 0 && double.IsFinite(size.Width) && double.IsFinite(size.Height)
+                    ? size : new Size(612, 792));
+            ResetStrip(pageSizes.Count);
+        }
+
         /// <summary>设置长条里指定页的位图源。</summary>
         public void SetStripPageSource(int pageIndex, ImageSource source)
         {
             if (pageIndex < 0 || pageIndex >= _pageImages.Count) return;
             _pageImages[pageIndex].Source = source;
             _pageSources[pageIndex] = source;
-            RecomputeStripLayout();
+            if (source == null) _loadedStripPages.Remove(pageIndex); else _loadedStripPages.Add(pageIndex);
+        }
+
+        public void RetainStripSources(ISet<int> pages)
+        {
+            var discard = new List<int>();
+            foreach (int i in _loadedStripPages) if (!pages.Contains(i)) discard.Add(i);
+            foreach (int i in discard) SetStripPageSource(i, null);
         }
 
         /// <summary>设置滚动偏移并平移长条。</summary>
         public void SetScrollOffset(double offset)
         {
-            _scrollOffset = offset;
+            _scrollOffset = ClampScrollOffset(offset);
             StripTransform.Y = -_scrollOffset;
+        }
+
+        public double ClampScrollOffset(double offset)
+        {
+            if (!double.IsFinite(offset)) return _scrollOffset;
+            double minimum = _viewMatrix.OffsetY / Math.Max(.001, _viewMatrix.M11);
+            return Math.Clamp(offset, minimum, minimum + Math.Max(0, StripHeight - EffectiveViewportHeight));
         }
 
         /// <summary>
@@ -358,9 +401,8 @@ namespace PdfReader.Views
             for (int i = 0; i < _pageImages.Count; i++)
             {
                 var img = _pageImages[i];
-                var source = _pageSources[i];
-                double imgW = source?.Width ?? 612;
-                double imgH = source?.Height ?? 792;
+                double imgW = _pageSizes[i].Width;
+                double imgH = _pageSizes[i].Height;
 
                 // 与单页模式 ComputeUniformRect 相同的 Uniform 计算。
                 double scale = Math.Min(viewW / imgW, viewH > 0 ? viewH / imgH : 1.0);
@@ -410,13 +452,14 @@ namespace PdfReader.Views
             double winTop = -_viewMatrix.OffsetY / s;
             double winBottom = winTop + viewH / s;
 
-            for (int i = 0; i < _pageImages.Count; i++)
+            for (int i = GetPageIndexAtStripOffset(_scrollOffset + winTop); i < _pageImages.Count; i++)
             {
                 var img = _pageImages[i];
-                double w = img.ActualWidth > 0 ? img.ActualWidth : img.Width;
-                double h = img.ActualHeight > 0 ? img.ActualHeight : img.Height;
+                double w = img.Width;
+                double h = img.Height;
                 double pageTop = Canvas.GetTop(img) - _scrollOffset;
                 double pageBottom = pageTop + h;
+                if (pageTop >= winBottom) break;
 
                 if (pageBottom > winTop && pageTop < winBottom)
                 {
@@ -441,14 +484,15 @@ namespace PdfReader.Views
         /// <summary>长条模式下给定 Y 坐标所属页。</summary>
         public int GetPageIndexAtStripOffset(double y)
         {
-            for (int i = 0; i < _pageImages.Count; i++)
+            int low = 0, high = _pageImages.Count - 1;
+            while (low < high)
             {
-                double top = Canvas.GetTop(_pageImages[i]);
-                double h = _pageImages[i].ActualHeight > 0 ? _pageImages[i].ActualHeight : _pageImages[i].Height;
-                if (y >= top && y < top + h) return i;
+                int middle = low + (high - low) / 2;
+                var image = _pageImages[middle];
+                if (Canvas.GetTop(image) + image.Height <= y) low = middle + 1;
+                else high = middle;
             }
-            if (y < 0) return 0;
-            return Math.Max(0, _pageImages.Count - 1);
+            return low;
         }
 
         #endregion
@@ -462,8 +506,8 @@ namespace PdfReader.Views
             {
                 if (pageIndex < 0 || pageIndex >= _pageImages.Count) return null;
                 var img = _pageImages[pageIndex];
-                double w = img.ActualWidth > 0 ? img.ActualWidth : img.Width;
-                double h = img.ActualHeight > 0 ? img.ActualHeight : img.Height;
+                double w = img.Width;
+                double h = img.Height;
                 double top = Canvas.GetTop(img) - _scrollOffset;
                 return new Rect((ActualWidth - w) / 2, top, w, h);
             }

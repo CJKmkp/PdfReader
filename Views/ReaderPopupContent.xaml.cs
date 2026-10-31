@@ -72,7 +72,7 @@ namespace PdfReader.Views
             DisplayModeCombo.IsEnabled = open;
 
             // 同步模式选择，抑制事件循环。
-            var mode = _plugin?.DisplayMode ?? PdfDisplayMode.SinglePage;
+            var mode = _plugin?.DisplayMode ?? PdfDisplayMode.ContinuousScroll;
             foreach (var obj in DisplayModeCombo.Items)
             {
                 if (obj is ComboBoxItem item && item.Tag is PdfDisplayMode m && m == mode)

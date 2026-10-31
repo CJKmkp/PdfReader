@@ -11,7 +11,7 @@
          SetCanvasContentAnchor），因此墨迹仍与缩放后的页面内容正确对齐。 -->
     <Grid Background="#FF1E1E1E" ClipToBounds="True">
         <!-- 缩放/平移容器：只缩放 PDF 页面内容，不缩放深色画布背景 -->
-        <Grid x:Name="ContentHost" ClipToBounds="True">
+        <Grid x:Name="ContentHost" ClipToBounds="False">
             <Grid.RenderTransform>
                 <MatrixTransform x:Name="ContentHostTransform" />
             </Grid.RenderTransform>

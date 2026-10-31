@@ -123,7 +123,11 @@ namespace PdfReader
             }
 
             // 白板与 PDF 互操作（打开前退出白板、关闭后回到白板）需要的服务。
-            try { _canvasInkService = GetService<ICanvasInkService>(); }
+            try
+            {
+                _canvasInkService = GetService<ICanvasInkService>();
+                if (_canvasInkService != null) _isPenMode = _canvasInkService.IsPenMode;
+            }
             catch { _canvasInkService = null; }
 
             try
@@ -332,7 +336,7 @@ namespace PdfReader
 
         internal PdfDisplayMode DisplayMode
         {
-            get { lock (_gate) return _session?.DisplayMode ?? PdfDisplayMode.SinglePage; }
+            get { lock (_gate) return _session?.DisplayMode ?? _config?.DisplayMode ?? PdfDisplayMode.ContinuousScroll; }
         }
 
         internal async Task SetDisplayModeAsync(PdfDisplayMode mode)
@@ -342,6 +346,8 @@ namespace PdfReader
             if (session?.IsOpen != true) return;
 
             await session.SetDisplayModeAsync(mode, CancellationToken.None).ConfigureAwait(false);
+            _config.DisplayMode = session.DisplayMode;
+            SaveConfig();
         }
 
         internal string StatusText => _statusText;

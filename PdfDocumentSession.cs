@@ -17,19 +17,21 @@ namespace PdfReader
     internal sealed class PdfDocumentSession : IDisposable
     {
         private readonly PdfDocument _document;
+        private readonly Windows.Foundation.Size[] _pageSizes;
 
         /// <summary>只保护 GetPage：同一个 PdfDocument 上的 WinRT 调用不保证线程安全。</summary>
         private readonly SemaphoreSlim _pageGate = new SemaphoreSlim(1, 1);
         private int _disposed;
 
-        private PdfDocumentSession(PdfDocument document, string path)
+        private PdfDocumentSession(PdfDocument document, string path, Windows.Foundation.Size[] pageSizes)
         {
             _document = document;
+            _pageSizes = pageSizes;
             FilePath = path;
         }
 
         public string FilePath { get; }
-        public uint PageCount => _document?.PageCount ?? 0;
+        public uint PageCount => (uint)_pageSizes.Length;
         public bool IsPasswordProtected => _document?.IsPasswordProtected ?? false;
 
         /// <summary>打开一个 PDF 并保留 PdfDocument 实例。</summary>
@@ -47,7 +49,21 @@ namespace PdfReader
                 throw new InvalidOperationException(Strings.ErrorPasswordProtected);
             }
 
-            return new PdfDocumentSession(document, path);
+            var sizes = await Task.Run(() =>
+            {
+                uint count = document.PageCount;
+                var result = new Windows.Foundation.Size[count];
+                for (uint i = 0; i < count; i++)
+                {
+                    cancellationToken.ThrowIfCancellationRequested();
+                    using var page = document.GetPage(i);
+                    var size = page.Size;
+                    result[i] = size.Width > 0 && size.Height > 0 && double.IsFinite(size.Width) && double.IsFinite(size.Height)
+                        ? size : new Windows.Foundation.Size(612, 792);
+                }
+                return result;
+            }, cancellationToken).ConfigureAwait(false);
+            return new PdfDocumentSession(document, path, sizes);
         }
 
         /// <summary>读取一页的 PDF 点尺寸。</summary>
@@ -57,15 +73,7 @@ namespace PdfReader
             if (pageIndex < 0 || pageIndex >= PageCount)
                 throw new ArgumentOutOfRangeException(nameof(pageIndex));
 
-            var page = _document.GetPage((uint)pageIndex);
-            try
-            {
-                return page.Size;
-            }
-            finally
-            {
-                (page as IDisposable)?.Dispose();
-            }
+            return _pageSizes[pageIndex];
         }
 
         /// <summary>
@@ -153,7 +161,8 @@ namespace PdfReader
         {
             if (Interlocked.Exchange(ref _disposed, 1) != 0) return;
             // PdfDocument 未实现 IClosable，无需显式释放。
-            try { _pageGate.Dispose(); } catch { }
+            // In-flight renders can still release the semaphore after cancellation.
+            // It has no native wait handle; leave it to GC with this session.
         }
     }
 }
