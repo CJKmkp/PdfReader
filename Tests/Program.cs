@@ -168,6 +168,17 @@ internal static class Program
             Check(session.DisplayMode == PdfDisplayMode.ContinuousScroll && session.CurrentPage == 20,
                 "Opening a saved late page rendered the beginning of the document instead");
             Pump(300);
+            var preview = session.RenderPreviewAsync(21, CancellationToken.None);
+            Wait(preview);
+            Check(preview.Result != null && preview.Result.IsFrozen && preview.Result.PixelWidth <= 240 && preview.Result.PixelHeight <= 201,
+                "Catalogue thumbnail was missing, unfrozen, or rendered at reading resolution");
+            var invalidPreview = session.RenderPreviewAsync(0, CancellationToken.None); Wait(invalidPreview);
+            Check(invalidPreview.Result == null, "Catalogue accepted a zero-based page number");
+            var jump = session.SelectPreviewPageAsync(38, CancellationToken.None); Wait(jump);
+            Check(jump.Result == 38 && session.CurrentPage == 37, "Continuous catalogue jump selected the wrong page");
+            var invalidJump = session.SelectPreviewPageAsync(61, CancellationToken.None); Wait(invalidJump);
+            Check(invalidJump.Result == 0 && session.CurrentPage == 37, "Invalid catalogue jump changed the page");
+            Wait(session.ScrollToPageTopAsync(20, CancellationToken.None)); Pump(300);
             Check(view.GetStripPageImage(20).Source is BitmapSource && view.GetStripPageImage(50).Source == null && view.ResidentPageCount <= 5,
                 "Continuous mode rendered or retained offscreen pages");
             // These tests concern document touch navigation only, not ink storage.
@@ -225,6 +236,11 @@ internal static class Program
             Wait(Task.Run(() => session.ScrollByAsync(30))); Pump(160);
             Check(Math.Abs(view.ScrollOffset - 30) < .01, "Background navigation accessed WPF outside its dispatcher");
             Wait(session.SetDisplayModeAsync(PdfDisplayMode.SinglePage, CancellationToken.None));
+            var singleJump = session.SelectPreviewPageAsync(13, CancellationToken.None); Wait(singleJump);
+            Check(singleJump.Result == 13 && session.CurrentPage == 12, "Single-page catalogue jump used a continuous offset");
+            Wait(session.SetDisplayModeAsync(PdfDisplayMode.DoublePage, CancellationToken.None));
+            var doubleJump = session.SelectPreviewPageAsync(14, CancellationToken.None); Wait(doubleJump);
+            Check(doubleJump.Result == 13 && session.CurrentPage == 12, "Double-page catalogue jump did not align to the page pair");
             Wait(session.SetDisplayModeAsync(PdfDisplayMode.ContinuousScroll, CancellationToken.None)); Pump(180);
             Check(view.Mode == PdfDisplayMode.ContinuousScroll && view.GetStripVisiblePageRects().Count > 0,
                 "Switching page/continuous mode left an empty reading view");

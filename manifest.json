@@ -1,7 +1,7 @@
 {
   "Id": "com.icc.pdf-reader",
   "Name": "PDF 阅读器",
-  "Version": "2.3.3",
+  "Version": "2.3.4",
   "Description": "PDF 连续阅读：支持滚轮滚动、选择模式触屏平移与缩放、批注模式双指跨页浏览；可见页按需渲染。使用宿主墨迹工具批注，并可导出含墨迹的 PDF。",
   "Author": "ICC-CE",
   "EntranceAssembly": "PdfReader.dll",

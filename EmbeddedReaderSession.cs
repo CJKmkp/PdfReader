@@ -341,7 +341,7 @@ namespace PdfReader
         /// <summary>构建外部演示源描述符（进入放映与退出白板重放共用）。</summary>
         private PresentationSourceDescriptor CreatePresentationDescriptor(int pageCount)
         {
-            return new PresentationSourceDescriptor
+            var descriptor = new PresentationSourceDescriptor
             {
                 Id = PresentationSourceId,
                 Name = Strings.PluginName,
@@ -350,6 +350,8 @@ namespace PdfReader
                 NavigateAsync = HandleHostNavigationAsync,
                 AllowPageNumberClick = false
             };
+            EnablePresentationPreview(descriptor);
+            return descriptor;
         }
 
         /// <summary>
