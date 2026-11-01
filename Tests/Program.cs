@@ -39,7 +39,7 @@ internal static class Program
         string root = Path.Combine(Path.GetTempPath(), "PdfReaderContinuous_" + Guid.NewGuid().ToString("N")); Directory.CreateDirectory(root);
         try
         {
-            WindowStateTests(); WheelStepTests(); RenderBudgetTests(); NativeResolutionTests(root); ConfigTests(root); LayoutTests(); SessionTests(root);
+            WindowStateTests(); WheelStepTests(); RenderBudgetTests(); ViewportPlanTests(); NativeResolutionTests(root); RegionRenderTests(root); ConfigTests(root); LayoutTests(); SessionTests(root);
             Console.WriteLine($"PASS: {_checks} continuous PDF checks"); return 0;
         }
         catch (Exception ex) { Console.Error.WriteLine(ex); return 1; }
@@ -109,6 +109,48 @@ internal static class Program
         var rendering = document.RenderAsync(0, 5120, CancellationToken.None);
         Wait(rendering);
         Check(rendering.Result.PixelWidth == 5120, "Native PDF renderer silently capped high-resolution requests at 4096px");
+    }
+
+    private static void RegionRenderTests(string root)
+    {
+        foreach (string kind in new[] { "normal", "rotated90", "rotated180", "rotated270", "cropped", "cropped90" })
+        {
+            string path = Path.Combine(root, kind + "-regions.pdf");
+            using (var pdf = new PdfDocument())
+            {
+                var page = pdf.AddPage(); page.Width = PdfSharp.Drawing.XUnit.FromPoint(600); page.Height = PdfSharp.Drawing.XUnit.FromPoint(800);
+                using (var drawing = PdfSharp.Drawing.XGraphics.FromPdfPage(page))
+                {
+                    for (int x = 0; x < 10; x++) for (int y = 0; y < 10; y++)
+                        drawing.DrawRectangle(new PdfSharp.Drawing.XSolidBrush(PdfSharp.Drawing.XColor.FromArgb(x * 20, y * 20, (x + y) * 10)),
+                            x * 60, y * 80, 60, 80);
+                }
+                if (kind.StartsWith("rotated")) page.Rotate = int.Parse(kind[7..]);
+                if (kind.StartsWith("cropped")) page.CropBox = new PdfRectangle(new PdfSharp.Drawing.XPoint(80, 100), new PdfSharp.Drawing.XPoint(520, 700));
+                if (kind == "cropped90") page.Rotate = 90;
+                pdf.Save(path);
+            }
+            var open = PdfDocumentSession.OpenAsync(path, CancellationToken.None); Wait(open);
+            using var document = open.Result;
+            var full = document.RenderAsync(0, 600, CancellationToken.None); Wait(full);
+            var source = new Rect(.1, .55, .3, .3);
+            int height = Math.Max(1, (int)(full.Result.PixelHeight * source.Height));
+            var tile = document.RenderRegionAsync(0, source, 180, height, CancellationToken.None); Wait(tile);
+            Check(tile.Result.IsFrozen && tile.Result.PixelWidth == 180 && tile.Result.PixelHeight == height,
+                kind + ": region renderer ignored output size");
+            byte[] Pixel(BitmapSource bitmap, int x, int y)
+            {
+                var converted = new FormatConvertedBitmap(bitmap, PixelFormats.Bgra32, null, 0);
+                var pixel = new byte[4]; converted.CopyPixels(new Int32Rect(x, y, 1, 1), pixel, 4, 0); return pixel;
+            }
+            foreach (double x in new[] { .1, .9 }) foreach (double y in new[] { .1, .9 })
+            {
+                var expected = Pixel(full.Result, (int)((source.X + source.Width * x) * full.Result.PixelWidth), (int)((source.Y + source.Height * y) * full.Result.PixelHeight));
+                var actual = Pixel(tile.Result, (int)(x * tile.Result.PixelWidth), (int)(y * tile.Result.PixelHeight));
+                Check(expected.Zip(actual).All(pair => Math.Abs(pair.First - pair.Second) < 10), kind + ": region was rotated or cropped at the wrong coordinates "
+                    + string.Join(",", expected) + " vs " + string.Join(",", actual));
+            }
+        }
     }
 
     private static void ConfigTests(string root)
@@ -288,18 +330,49 @@ internal static class Program
                     ? (BitmapSource)view.GetStripPageImage(0).Source
                     : (BitmapSource)((Image)view.FindName("LeftImage")).Source;
                 int baselineWidth = Bitmap().PixelWidth;
+                var sharpeningWatch = Stopwatch.StartNew();
                 Check(session.ApplyTouchNavigation(2, new Vector(), 6, new Point(400, 300)), "Zoom fixture was rejected");
-                session.OnCanvasGestureCompleted(null); Pump(250);
-                if (mode == PdfDisplayMode.ContinuousScroll) Wait(Field<Task>(session, "_stripRenderTask"));
-                var timer = Stopwatch.StartNew();
-                while (Bitmap().PixelWidth <= baselineWidth && timer.ElapsedMilliseconds < 5000) Pump(30);
-                Check(Bitmap().PixelWidth > baselineWidth, $"{mode}: default performance mode did not refine the enlarged bitmap");
+                session.OnCanvasGestureCompleted(null);
+                Wait(Field<Task>(session, "_detailTask"));
+                Console.WriteLine($"{mode}: visible-region sharpening {sharpeningWatch.ElapsedMilliseconds}ms");
+                var details = (Canvas)view.FindName("DetailLayer");
+                Check(details.Children.Count > 0 && details.Children.OfType<Image>().All(image => image.Source is BitmapSource { IsFrozen: true }),
+                    $"{mode}: enlarged visible region was not sharpened");
+                Check(Bitmap().PixelWidth == baselineWidth, $"{mode}: zoom unnecessarily allocated a whole-page high-resolution bitmap");
+                foreach (Image image in details.Children)
+                    Check(((BitmapSource)image.Source).PixelWidth / image.Width >= session.ViewScale * .95,
+                        $"{mode}: visible detail tile was below screen resolution");
+                session.ApplyTouchNavigation(2, new Vector(), 1.05, new Point(400, 300));
+                var obsoleteDetail = Field<Task>(session, "_detailTask");
+                Wait(session.ResetZoomAsync()); Wait(obsoleteDetail); Pump(80);
+                Check(view.DetailTileCount == 0, $"{mode}: cancelled zoom republished detail tiles after reset");
             }
+            session.ApplyTouchNavigation(2, new Vector(), 2, new Point(400, 300));
+            Wait(session.SetDisplayModeAsync(PdfDisplayMode.ContinuousScroll, CancellationToken.None)); Pump(30);
+            Wait(Field<Task>(session, "_detailTask"));
+            Check(view.DetailTileCount > 0, "Changing reading mode at high zoom did not restore viewport detail");
+            session.ApplyTouchNavigation(2, new Vector(), 1.05, new Point(400, 300));
             session.Close(); Pump(250);
+            Check(view.DetailTileCount == 0, "Closed PDF retained or republished stale detail tiles");
             Check(!composition.HasBackgroundLayer, "Closed PDF retained its background view");
             Check(errors.Count == 0, "Continuous reader logged failures: " + string.Join("\n", errors));
         }
         finally { window.Close(); }
+    }
+
+    private static void ViewportPlanTests()
+    {
+        var page = new Ink_Canvas.Plugins.PluginVisiblePage { PageIndex = 2, ContentRect = new Rect(0, 0, 1000, 1400) };
+        var matrix = new Matrix(8, 0, 0, 8, -1000, -3000);
+        var plan = ViewportRenderPlan.Create(new[] { page }, matrix, new Size(1000, 700), 1, 4L << 20);
+        Check(plan.Count == 1 && plan[0].Page == 2 && plan[0].Source.Width < .14 && plan[0].Source.Height < .07,
+            "High zoom still requested the entire PDF page");
+        Check(plan[0].PixelWidth <= 1032 && plan[0].PixelHeight <= 732, "Viewport rendering exceeded screen dimensions plus overscan");
+        var constrained = ViewportRenderPlan.Create(new[] { page }, matrix, new Size(4000, 3000), 2, 1L << 20);
+        Check(constrained.Sum(tile => (long)tile.PixelWidth * tile.PixelHeight * 4) <= 1L << 20,
+            "High-DPI detail rendering exceeded its byte budget");
+        Check(ViewportRenderPlan.Create(new[] { page }, new Matrix(0, 0, 0, 0, 0, 0), new Size(1000, 700), 1, 1L << 20).Count == 0,
+            "Singular transform generated invalid render coordinates");
     }
 
     private static void MouseNavigationTests(EmbeddedReaderSession session, TestComposition composition, PdfBackgroundView view)

@@ -50,6 +50,7 @@
                     <TranslateTransform x:Name="StripTransform" />
                 </Canvas.RenderTransform>
             </Canvas>
+            <Canvas x:Name="DetailLayer" IsHitTestVisible="False" ClipToBounds="False"/>
         </Grid>
     </Grid>
 </UserControl>

@@ -141,6 +141,7 @@ namespace PdfReader
             if (_disposed) { session.Dispose(); throw new ObjectDisposedException(nameof(EmbeddedReaderSession)); }
             CancelStripRendering();
             EndMouseNavigation();
+            CancelViewportDetail();
             ResetNavigationTouches();
 
             PdfDocumentSession previous;
@@ -166,6 +167,7 @@ namespace PdfReader
             finally
             {
                 _modeSwitching = false;
+                QueueViewportDetailRender(immediate: true);
             }
 
             await BeginPresentationAsync((int)session.PageCount, cancellationToken).ConfigureAwait(false);
@@ -211,10 +213,10 @@ namespace PdfReader
             {
                 // 翻页模式：渲染当前页（双页渲染页对）。
                 int page = CurrentPage;
-                var left = await RenderPageAsync(page, cancellationToken).ConfigureAwait(false);
+                var left = await RenderPageAsync(page, cancellationToken, display: true).ConfigureAwait(false);
                 BitmapSource right = null;
                 if (_displayMode == PdfDisplayMode.DoublePage && page + 1 < PageCount)
-                    right = await RenderPageAsync(page + 1, cancellationToken).ConfigureAwait(false);
+                    right = await RenderPageAsync(page + 1, cancellationToken, display: true).ConfigureAwait(false);
 
                 ApplyBackground(left, right);
 
@@ -253,6 +255,7 @@ namespace PdfReader
             if (_displayMode == mode) return;
             CancelStripRendering();
             EndMouseNavigation();
+            CancelViewportDetail();
             ResetNavigationTouches();
 
             var view = _backgroundView;
@@ -282,6 +285,7 @@ namespace PdfReader
             finally
             {
                 _modeSwitching = false;
+                QueueViewportDetailRender(immediate: true);
             }
         }
 
@@ -486,6 +490,7 @@ namespace PdfReader
                 catch { }
                 SyncVisiblePagesAsync();
                 QueueStripRender();
+                QueueViewportDetailRender();
             }
         }
 
@@ -668,6 +673,7 @@ namespace PdfReader
             if (_navigationTouches.Count > 0) return;
             if (!_gestureActive) return;
             _gestureActive = false;
+            QueueViewportDetailRender(immediate: true);
 
             // 手势期间墨迹已用同一增量矩阵实时跟随；结束时按最终视图矩阵把墨迹重放归位到各页。
             SyncVisiblePagesAsync();
@@ -705,6 +711,7 @@ namespace PdfReader
 
             // 手势期间不重分页（避免频繁清/填画布），结束后去抖一次按最终矩阵归位。
             ScheduleSettleSync();
+            QueueViewportDetailRender();
             if (_displayMode == PdfDisplayMode.ContinuousScroll) UpdateCurrentPageFromScroll();
             // Keep the existing bitmap during a pinch. Refine once the zoom settles,
             // rather than repeatedly starting native renders for intermediate scales.
@@ -820,6 +827,7 @@ namespace PdfReader
             // 4. 去抖后重建可见页墨迹。
             ScheduleSettleSync();
             QueueStripRender();
+            QueueViewportDetailRender();
         }
 
         /// <summary>上一页（翻页模式翻到上一页，滚动模式滚到上一页顶部）。</summary>
@@ -950,12 +958,18 @@ namespace PdfReader
         }
 
         /// <summary>
-        /// 当前页的渲染密度与显示密度相差超过一个桶时，
-        /// 按当前显示密度重渲染当前页——接近矢量的逐级光栅化，与主流 PDF 浏览器一致。
-        /// 用 _navigating 与翻页互斥：渲染期间用户翻页会先暂存，渲染完成后继续。
+        /// 放大时独立精化可见区域；整页底图只按未放大的视口密度渲染。
+        /// 底图更新与翻页互斥，避免后台更新吞掉排队的翻页请求。
         /// </summary>
         private async Task MaybeReRenderForZoomAsync()
         {
+            if (CurrentScale > 1.001)
+            {
+                QueueViewportDetailRender();
+                if (_displayMode == PdfDisplayMode.ContinuousScroll) QueueStripRender();
+                return;
+            }
+            CancelViewportDetail();
             if (_displayMode == PdfDisplayMode.ContinuousScroll)
             {
                 QueueStripRender();
@@ -968,7 +982,7 @@ namespace PdfReader
             if (document == null) return;
 
             int page = CurrentPage;
-            int width = ComputeRenderWidth(document, page);
+            int width = ComputeRenderWidth(document, page, 1);
             int bucket = width / ZoomModel.WidthBucket;
             if (bucket == _currentPageWidthBucket) return;
 
@@ -979,7 +993,7 @@ namespace PdfReader
                 while (ReferenceEquals(document, _document) && !_disposed
                     && _displayMode != PdfDisplayMode.ContinuousScroll)
                 {
-                    bucket = ComputeRenderWidth(document, CurrentPage) / ZoomModel.WidthBucket;
+                    bucket = ComputeRenderWidth(document, CurrentPage, 1) / ZoomModel.WidthBucket;
                     if (bucket != _currentPageWidthBucket)
                     {
                         await RenderCurrentPageAsync(CancellationToken.None).ConfigureAwait(false);
@@ -989,7 +1003,7 @@ namespace PdfReader
                     int pending = Interlocked.Exchange(ref _pendingPage, -1);
                     if (pending >= 0)
                         await GoToPageCoreAsync(pending, CancellationToken.None).ConfigureAwait(false);
-                    else if (ComputeRenderWidth(document, CurrentPage) / ZoomModel.WidthBucket == _currentPageWidthBucket)
+                    else if (ComputeRenderWidth(document, CurrentPage, 1) / ZoomModel.WidthBucket == _currentPageWidthBucket)
                         break;
                 }
             }
@@ -1183,12 +1197,12 @@ namespace PdfReader
             var view = _backgroundView;
             var mode = _displayMode;
             int page = CurrentPage;
-            var left = await RenderPageAsync(page, cancellationToken).ConfigureAwait(false);
+            var left = await RenderPageAsync(page, cancellationToken, display: true).ConfigureAwait(false);
             if (!ReferenceEquals(document, _document) || !ReferenceEquals(view, _backgroundView)
                 || mode != _displayMode || page != CurrentPage || view == null) return;
             BitmapSource right = null;
             if (mode == PdfDisplayMode.DoublePage && page + 1 < PageCount)
-                right = await RenderPageAsync(page + 1, cancellationToken).ConfigureAwait(false);
+                right = await RenderPageAsync(page + 1, cancellationToken, display: true).ConfigureAwait(false);
 
             await view.Dispatcher.InvokeAsync(() =>
             {
@@ -1217,7 +1231,7 @@ namespace PdfReader
         }
 
         /// <summary>渲染指定页，命中缓存则直接返回。</summary>
-        private async Task<BitmapSource> RenderPageAsync(int pageIndex, CancellationToken cancellationToken)
+        private async Task<BitmapSource> RenderPageAsync(int pageIndex, CancellationToken cancellationToken, bool display = false)
         {
             PdfDocumentSession document;
             PageRenderCache cache;
@@ -1228,7 +1242,7 @@ namespace PdfReader
             }
             if (document == null) return null;
 
-            int width = ComputeRenderWidth(document, pageIndex);
+            int width = ComputeRenderWidth(document, pageIndex, display ? 1 : null);
             int bucket = width / ZoomModel.WidthBucket;
 
             if (cache.TryGet(pageIndex, bucket, out var cached)) return cached;
@@ -1243,7 +1257,7 @@ namespace PdfReader
             => RenderPageAsync((int)pageIndex, cancellationToken);
 
         /// <summary>按页面物理尺寸与质量档位计算渲染宽度。</summary>
-        private int ComputeRenderWidth(PdfDocumentSession document, int pageIndex)
+        private int ComputeRenderWidth(PdfDocumentSession document, int pageIndex, double? zoomOverride = null)
         {
             double pageWidth;
             double pageHeight;
@@ -1271,7 +1285,7 @@ namespace PdfReader
                     double fit = Math.Min(viewW / pageWidth, viewH / pageHeight);
                     if (fit > 0 && !double.IsInfinity(fit))
                     {
-                        double zoom = ZoomModel.Clamp(CurrentScale);
+                        double zoom = ZoomModel.Clamp(zoomOverride ?? CurrentScale);
                         density = Math.Max(3.0, fit * zoom * _dpiScale);
                     }
                 }
@@ -1286,7 +1300,7 @@ namespace PdfReader
                 double viewportWidth = _displayMode == PdfDisplayMode.DoublePage
                     ? _viewportSize.Width / 2 : _viewportSize.Width;
                 double fit = Math.Min(viewportWidth / pageWidth, _viewportSize.Height / pageHeight);
-                factor = Math.Max(factor, fit * ZoomModel.Clamp(CurrentScale) * _dpiScale);
+                factor = Math.Max(factor, fit * ZoomModel.Clamp(zoomOverride ?? CurrentScale) * _dpiScale);
             }
             return ZoomModel.ComputeBudgetedRenderWidth(factor, pageWidth, pageHeight,
                 _config.CacheBudgetBytes / (_displayMode == PdfDisplayMode.DoublePage ? 2 : 1));
@@ -1295,6 +1309,7 @@ namespace PdfReader
         /// <summary>质量档位变化后：清缓存并按新档位重渲染当前视图（滚动模式重建长条）。</summary>
         internal async Task ReloadRenderQualityAsync()
         {
+            CancelViewportDetail();
             lock (_gate) { _cache?.Clear(); }
             if (!IsOpen) return;
 
@@ -1331,6 +1346,7 @@ namespace PdfReader
         public void SuspendForWhiteboard()
         {
             if (!IsOpen) return;
+            CancelViewportDetail();
             EndMouseNavigation();
 
             // 事件在宿主清空画布之前触发，此处同步归位墨迹到页缓存；
@@ -1379,6 +1395,7 @@ namespace PdfReader
         /// <summary>关闭文档并移除背景层。</summary>
         public void Close()
         {
+            CancelViewportDetail();
             CancelStripRendering();
             EndPresentation();
 

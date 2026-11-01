@@ -69,7 +69,7 @@ namespace PdfReader
                 long pixelsPerPage = Math.Max(65536, (long)(_config.CacheBudgetBytes * share / 4));
                 var size = document.GetPageSize(page);
                 int budgetWidth = (int)Math.Max(1, Math.Sqrt(pixelsPerPage * size.Width / Math.Max(1, size.Height)));
-                int requested = Math.Min(ComputeRenderWidth(document, page), budgetWidth);
+                int requested = Math.Min(ComputeRenderWidth(document, page, 1), budgetWidth);
                 return requested < ZoomModel.WidthBucket ? Math.Max(1, requested) : requested / ZoomModel.WidthBucket * ZoomModel.WidthBucket;
             }).ToArray();
             string key = string.Join(";", pages.Select((page, index) => page + ":" + widths[index]));
