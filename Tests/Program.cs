@@ -39,7 +39,7 @@ internal static class Program
         string root = Path.Combine(Path.GetTempPath(), "PdfReaderContinuous_" + Guid.NewGuid().ToString("N")); Directory.CreateDirectory(root);
         try
         {
-            WindowStateTests(); RenderBudgetTests(); NativeResolutionTests(root); ConfigTests(root); LayoutTests(); SessionTests(root);
+            WindowStateTests(); WheelStepTests(); RenderBudgetTests(); ViewportPlanTests(); NativeResolutionTests(root); RegionRenderTests(root); ConfigTests(root); LayoutTests(); SessionTests(root);
             Console.WriteLine($"PASS: {_checks} continuous PDF checks"); return 0;
         }
         catch (Exception ex) { Console.Error.WriteLine(ex); return 1; }
@@ -84,6 +84,15 @@ internal static class Program
         }
     }
 
+    private static void WheelStepTests()
+    {
+        Check(EmbeddedReaderSession.ComputeWheelScrollStep(-120, 3, 800, 1) == 144, "Wheel notch did not respect the three-line Windows preference");
+        Check(EmbeddedReaderSession.ComputeWheelScrollStep(-15, 3, 800, 1) == 18, "High-resolution wheel delta was rounded");
+        Check(EmbeddedReaderSession.ComputeWheelScrollStep(120, 3, 800, 2) == -72, "Zoomed wheel speed changed on screen");
+        Check(EmbeddedReaderSession.ComputeWheelScrollStep(-120, -1, 800, 1) == 720, "Page-scroll preference was treated as a negative line count");
+        Check(EmbeddedReaderSession.ComputeWheelScrollStep(120, 0, 800, 1) == 0, "Disabled Windows wheel scrolling was ignored");
+    }
+
     private static void NativeResolutionTests(string root)
     {
         string path = Path.Combine(root, "wide.pdf");
@@ -100,6 +109,48 @@ internal static class Program
         var rendering = document.RenderAsync(0, 5120, CancellationToken.None);
         Wait(rendering);
         Check(rendering.Result.PixelWidth == 5120, "Native PDF renderer silently capped high-resolution requests at 4096px");
+    }
+
+    private static void RegionRenderTests(string root)
+    {
+        foreach (string kind in new[] { "normal", "rotated90", "rotated180", "rotated270", "cropped", "cropped90" })
+        {
+            string path = Path.Combine(root, kind + "-regions.pdf");
+            using (var pdf = new PdfDocument())
+            {
+                var page = pdf.AddPage(); page.Width = PdfSharp.Drawing.XUnit.FromPoint(600); page.Height = PdfSharp.Drawing.XUnit.FromPoint(800);
+                using (var drawing = PdfSharp.Drawing.XGraphics.FromPdfPage(page))
+                {
+                    for (int x = 0; x < 10; x++) for (int y = 0; y < 10; y++)
+                        drawing.DrawRectangle(new PdfSharp.Drawing.XSolidBrush(PdfSharp.Drawing.XColor.FromArgb(x * 20, y * 20, (x + y) * 10)),
+                            x * 60, y * 80, 60, 80);
+                }
+                if (kind.StartsWith("rotated")) page.Rotate = int.Parse(kind[7..]);
+                if (kind.StartsWith("cropped")) page.CropBox = new PdfRectangle(new PdfSharp.Drawing.XPoint(80, 100), new PdfSharp.Drawing.XPoint(520, 700));
+                if (kind == "cropped90") page.Rotate = 90;
+                pdf.Save(path);
+            }
+            var open = PdfDocumentSession.OpenAsync(path, CancellationToken.None); Wait(open);
+            using var document = open.Result;
+            var full = document.RenderAsync(0, 600, CancellationToken.None); Wait(full);
+            var source = new Rect(.1, .55, .3, .3);
+            int height = Math.Max(1, (int)(full.Result.PixelHeight * source.Height));
+            var tile = document.RenderRegionAsync(0, source, 180, height, CancellationToken.None); Wait(tile);
+            Check(tile.Result.IsFrozen && tile.Result.PixelWidth == 180 && tile.Result.PixelHeight == height,
+                kind + ": region renderer ignored output size");
+            byte[] Pixel(BitmapSource bitmap, int x, int y)
+            {
+                var converted = new FormatConvertedBitmap(bitmap, PixelFormats.Bgra32, null, 0);
+                var pixel = new byte[4]; converted.CopyPixels(new Int32Rect(x, y, 1, 1), pixel, 4, 0); return pixel;
+            }
+            foreach (double x in new[] { .1, .9 }) foreach (double y in new[] { .1, .9 })
+            {
+                var expected = Pixel(full.Result, (int)((source.X + source.Width * x) * full.Result.PixelWidth), (int)((source.Y + source.Height * y) * full.Result.PixelHeight));
+                var actual = Pixel(tile.Result, (int)(x * tile.Result.PixelWidth), (int)(y * tile.Result.PixelHeight));
+                Check(expected.Zip(actual).All(pair => Math.Abs(pair.First - pair.Second) < 10), kind + ": region was rotated or cropped at the wrong coordinates "
+                    + string.Join(",", expected) + " vs " + string.Join(",", actual));
+            }
+        }
     }
 
     private static void ConfigTests(string root)
@@ -163,14 +214,34 @@ internal static class Program
         try
         {
             window.Show(); window.UpdateLayout();
-            Wait(session.OpenAsync(path, 20, CancellationToken.None)); Pump(250);
+            var openingWatch = Stopwatch.StartNew();
+            Wait(session.OpenAsync(path, 20, CancellationToken.None));
+            var firstView = (PdfBackgroundView)composition.Background;
+            Check(firstView.GetStripPageImage(20).Source is BitmapSource && Field<Task>(session, "_stripVisibleTask").IsCompleted,
+                "Opening finished without the requested page's first paint");
+            Console.WriteLine($"PDF open/first visible page: {openingWatch.ElapsedMilliseconds}ms (60-page fixture)");
+            Pump(250);
             var view = (PdfBackgroundView)composition.Background;
             Check(session.DisplayMode == PdfDisplayMode.ContinuousScroll && session.CurrentPage == 20,
                 "Opening a saved late page rendered the beginning of the document instead");
             Pump(300);
+            var preview = session.RenderPreviewAsync(21, CancellationToken.None);
+            Wait(preview);
+            Check(preview.Result != null && preview.Result.IsFrozen && preview.Result.PixelWidth <= 240 && preview.Result.PixelHeight <= 201,
+                "Catalogue thumbnail was missing, unfrozen, or rendered at reading resolution");
+            var invalidPreview = session.RenderPreviewAsync(0, CancellationToken.None); Wait(invalidPreview);
+            Check(invalidPreview.Result == null, "Catalogue accepted a zero-based page number");
+            var jump = session.SelectPreviewPageAsync(38, CancellationToken.None); Wait(jump);
+            Check(jump.Result == 38 && session.CurrentPage == 37, "Continuous catalogue jump selected the wrong page");
+            var invalidJump = session.SelectPreviewPageAsync(61, CancellationToken.None); Wait(invalidJump);
+            Check(invalidJump.Result == 0 && session.CurrentPage == 37, "Invalid catalogue jump changed the page");
+            Wait(session.ScrollToPageTopAsync(20, CancellationToken.None)); Pump(300);
             Check(view.GetStripPageImage(20).Source is BitmapSource && view.GetStripPageImage(50).Source == null && view.ResidentPageCount <= 5,
                 "Continuous mode rendered or retained offscreen pages");
             // These tests concern document touch navigation only, not ink storage.
+            Wait(session.ScrollToPageTopAsync(0, CancellationToken.None)); Pump(180);
+            MouseNavigationTests(session, composition, view);
+            Wait(session.ResetZoomAsync());
             Wait(session.ScrollToPageTopAsync(0, CancellationToken.None)); Pump(180);
             composition.InputCanvas.EditingMode = InkCanvasEditingMode.Select; session.IsPenMode = true;
             using (var touch = new TestTouchDevice(view, 1001))
@@ -210,7 +281,8 @@ internal static class Program
             Wait(session.ScrollToPageTopAsync(0, CancellationToken.None)); Pump(180);
             int notifications = 0; session.PageChanged += _ => notifications++;
             session.HandleScroll(-15); Pump(15);
-            Check(Math.Abs(view.ScrollOffset - 7.5) < .01, "High-resolution wheel scrolling jumped a full notch");
+            Check(Math.Abs(view.ScrollOffset - EmbeddedReaderSession.ComputeWheelScrollStep(-15, SystemParameters.WheelScrollLines, view.ActualHeight, 1)) < .01,
+                "High-resolution wheel scrolling jumped a full notch");
             for (int i = 0; i < 8; i++) session.HandleScroll(-15);
             Pump(180);
             Check(notifications == 0, "Scrolling inside one page repeatedly wrote the remembered page/config");
@@ -225,6 +297,11 @@ internal static class Program
             Wait(Task.Run(() => session.ScrollByAsync(30))); Pump(160);
             Check(Math.Abs(view.ScrollOffset - 30) < .01, "Background navigation accessed WPF outside its dispatcher");
             Wait(session.SetDisplayModeAsync(PdfDisplayMode.SinglePage, CancellationToken.None));
+            var singleJump = session.SelectPreviewPageAsync(13, CancellationToken.None); Wait(singleJump);
+            Check(singleJump.Result == 13 && session.CurrentPage == 12, "Single-page catalogue jump used a continuous offset");
+            Wait(session.SetDisplayModeAsync(PdfDisplayMode.DoublePage, CancellationToken.None));
+            var doubleJump = session.SelectPreviewPageAsync(14, CancellationToken.None); Wait(doubleJump);
+            Check(doubleJump.Result == 13 && session.CurrentPage == 12, "Double-page catalogue jump did not align to the page pair");
             Wait(session.SetDisplayModeAsync(PdfDisplayMode.ContinuousScroll, CancellationToken.None)); Pump(180);
             Check(view.Mode == PdfDisplayMode.ContinuousScroll && view.GetStripVisiblePageRects().Count > 0,
                 "Switching page/continuous mode left an empty reading view");
@@ -234,7 +311,11 @@ internal static class Program
             Check(Math.Abs(view.GetViewportTopScrollOffset()) < .1, "Zoomed navigation could not reach page one");
             Wait(session.ScrollByAsync(500));
             for (int i = 0; i < 15; i++) session.HandleScroll(-120);
+            session.IsPenMode = false;
+            Check(session.BeginMouseNavigation(new Point(300, 300), composition.InputCanvas), "Replacement-document drag fixture could not start");
             Wait(session.OpenAsync(other, 0, CancellationToken.None)); Pump(350);
+            Check(!session.UpdateMouseNavigation(new Point(300, 100)), "Replacing the PDF retained an old mouse drag");
+            session.IsPenMode = true;
             Check(session.PageCount == 1 && view.ResidentPageCount <= 1 && view.GetStripPageImage(0).Source != null,
                 "An old render task repainted a replacement document");
             var lastBitmap = (BitmapSource)view.GetStripPageImage(0).Source;
@@ -249,17 +330,81 @@ internal static class Program
                     ? (BitmapSource)view.GetStripPageImage(0).Source
                     : (BitmapSource)((Image)view.FindName("LeftImage")).Source;
                 int baselineWidth = Bitmap().PixelWidth;
+                var sharpeningWatch = Stopwatch.StartNew();
                 Check(session.ApplyTouchNavigation(2, new Vector(), 6, new Point(400, 300)), "Zoom fixture was rejected");
-                session.OnCanvasGestureCompleted(null); Pump(250);
-                if (mode == PdfDisplayMode.ContinuousScroll) Wait(Field<Task>(session, "_stripRenderTask"));
-                var timer = Stopwatch.StartNew();
-                while (Bitmap().PixelWidth <= baselineWidth && timer.ElapsedMilliseconds < 5000) Pump(30);
-                Check(Bitmap().PixelWidth > baselineWidth, $"{mode}: default performance mode did not refine the enlarged bitmap");
+                session.OnCanvasGestureCompleted(null);
+                Wait(Field<Task>(session, "_detailTask"));
+                Console.WriteLine($"{mode}: visible-region sharpening {sharpeningWatch.ElapsedMilliseconds}ms");
+                var details = (Canvas)view.FindName("DetailLayer");
+                Check(details.Children.Count > 0 && details.Children.OfType<Image>().All(image => image.Source is BitmapSource { IsFrozen: true }),
+                    $"{mode}: enlarged visible region was not sharpened");
+                Check(Bitmap().PixelWidth == baselineWidth, $"{mode}: zoom unnecessarily allocated a whole-page high-resolution bitmap");
+                foreach (Image image in details.Children)
+                    Check(((BitmapSource)image.Source).PixelWidth / image.Width >= session.ViewScale * .95,
+                        $"{mode}: visible detail tile was below screen resolution");
+                session.ApplyTouchNavigation(2, new Vector(), 1.05, new Point(400, 300));
+                var obsoleteDetail = Field<Task>(session, "_detailTask");
+                Wait(session.ResetZoomAsync()); Wait(obsoleteDetail); Pump(80);
+                Check(view.DetailTileCount == 0, $"{mode}: cancelled zoom republished detail tiles after reset");
             }
+            session.ApplyTouchNavigation(2, new Vector(), 2, new Point(400, 300));
+            Wait(session.SetDisplayModeAsync(PdfDisplayMode.ContinuousScroll, CancellationToken.None)); Pump(30);
+            Wait(Field<Task>(session, "_detailTask"));
+            Check(view.DetailTileCount > 0, "Changing reading mode at high zoom did not restore viewport detail");
+            session.ApplyTouchNavigation(2, new Vector(), 1.05, new Point(400, 300));
             session.Close(); Pump(250);
+            Check(view.DetailTileCount == 0, "Closed PDF retained or republished stale detail tiles");
             Check(!composition.HasBackgroundLayer, "Closed PDF retained its background view");
             Check(errors.Count == 0, "Continuous reader logged failures: " + string.Join("\n", errors));
         }
         finally { window.Close(); }
+    }
+
+    private static void ViewportPlanTests()
+    {
+        var page = new Ink_Canvas.Plugins.PluginVisiblePage { PageIndex = 2, ContentRect = new Rect(0, 0, 1000, 1400) };
+        var matrix = new Matrix(8, 0, 0, 8, -1000, -3000);
+        var plan = ViewportRenderPlan.Create(new[] { page }, matrix, new Size(1000, 700), 1, 4L << 20);
+        Check(plan.Count == 1 && plan[0].Page == 2 && plan[0].Source.Width < .14 && plan[0].Source.Height < .07,
+            "High zoom still requested the entire PDF page");
+        Check(plan[0].PixelWidth <= 1032 && plan[0].PixelHeight <= 732, "Viewport rendering exceeded screen dimensions plus overscan");
+        var constrained = ViewportRenderPlan.Create(new[] { page }, matrix, new Size(4000, 3000), 2, 1L << 20);
+        Check(constrained.Sum(tile => (long)tile.PixelWidth * tile.PixelHeight * 4) <= 1L << 20,
+            "High-DPI detail rendering exceeded its byte budget");
+        Check(ViewportRenderPlan.Create(new[] { page }, new Matrix(0, 0, 0, 0, 0, 0), new Size(1000, 700), 1, 1L << 20).Count == 0,
+            "Singular transform generated invalid render coordinates");
+    }
+
+    private static void MouseNavigationTests(EmbeddedReaderSession session, TestComposition composition, PdfBackgroundView view)
+    {
+        var origin = new Point(300, 300);
+        composition.InputCanvas.EditingMode = InkCanvasEditingMode.Ink; session.IsPenMode = true;
+        Check(!session.BeginMouseNavigation(origin, composition.InputCanvas), "Mouse drag stole left-button ink input");
+        composition.InputCanvas.EditingMode = InkCanvasEditingMode.Select;
+        Check(!session.BeginMouseNavigation(origin, new Button()) && !session.BeginMouseNavigation(origin, new ListBox()),
+            "Mouse drag stole toolbar or catalogue interaction");
+        Check(!session.BeginMouseNavigation(new Point(-1, 300), composition.InputCanvas), "Drag started outside the PDF viewport");
+        session.TouchGesturesEnabled = false;
+        Check(session.BeginMouseNavigation(origin, composition.InputCanvas), "Mouse selection drag incorrectly required touch gestures");
+        Check(session.UpdateMouseNavigation(new Point(301, 300)) && Math.Abs(view.GetViewportTopScrollOffset()) < .01,
+            "A click with slight pointer jitter moved the document");
+        Check(session.UpdateMouseNavigation(new Point(300, -1800)) && session.CurrentPage > 1,
+            "Mouse selection drag did not cross pages");
+        Check(!session.BeginTouchNavigation(99, origin), "Touch navigation started during a mouse drag");
+        session.EndMouseNavigation();
+        Check(!session.UpdateMouseNavigation(origin), "Released mouse drag kept moving the document");
+        Wait(session.ScrollToPageTopAsync(0, CancellationToken.None));
+        Check(session.BeginMouseNavigation(origin, composition.InputCanvas), "A completed drag prevented the next drag");
+        composition.InputCanvas.EditingMode = InkCanvasEditingMode.Ink;
+        Check(!session.UpdateMouseNavigation(new Point(300, 200)), "Switching to ink left mouse navigation active");
+        session.IsPenMode = false;
+        Check(session.BeginMouseNavigation(origin, composition.InputCanvas), "Reading-mode mouse drag was unavailable");
+        session.UpdateMouseNavigation(new Point(300, 100000));
+        Check(Math.Abs(view.GetViewportTopScrollOffset()) < .01, "Mouse drag overshot the document start");
+        var up = new MouseButtonEventArgs(Mouse.PrimaryDevice, Environment.TickCount, MouseButton.Left)
+        { RoutedEvent = UIElement.PreviewMouseUpEvent };
+        composition.InputCanvas.RaiseEvent(up);
+        Check(up.Handled && !session.UpdateMouseNavigation(origin), "Routed mouse release did not end navigation");
+        session.TouchGesturesEnabled = true; session.IsPenMode = true;
     }
 }

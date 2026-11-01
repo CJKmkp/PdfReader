@@ -57,7 +57,7 @@ namespace PdfReader
 
         internal bool BeginTouchNavigation(int id, Point position)
         {
-            if (!IsOpen || _modeSwitching || _backgroundView?.IsVisible != true || !CanUseSingleTouchNavigation
+            if (!IsOpen || _modeSwitching || _mouseDragOrigin != null || _backgroundView?.IsVisible != true || !CanUseSingleTouchNavigation
                 || !double.IsFinite(position.X) || !double.IsFinite(position.Y)) return false;
             _navigationTouches[id] = position; _gestureActive = true; return true;
         }

@@ -80,7 +80,24 @@ namespace PdfReader
         /// 把页面渲染成已经 Freeze 的 WPF BitmapSource。
         /// pixelWidth 是目标位图宽度；高度由 PDF 页面比例自动决定。
         /// </summary>
-        public async Task<BitmapSource> RenderAsync(int pageIndex, int pixelWidth, CancellationToken cancellationToken)
+        public Task<BitmapSource> RenderAsync(int pageIndex, int pixelWidth, CancellationToken cancellationToken)
+            => RenderCoreAsync(pageIndex, pixelWidth, 0, null, cancellationToken);
+
+        internal Task<BitmapSource> RenderRegionAsync(int pageIndex, Rect normalizedRegion, int pixelWidth, int pixelHeight,
+            CancellationToken cancellationToken)
+        {
+            if (normalizedRegion.IsEmpty || !double.IsFinite(normalizedRegion.X) || !double.IsFinite(normalizedRegion.Y)
+                || !double.IsFinite(normalizedRegion.Width) || !double.IsFinite(normalizedRegion.Height)
+                || normalizedRegion.Width <= 0 || normalizedRegion.Height <= 0
+                || normalizedRegion.X < 0 || normalizedRegion.Y < 0 || normalizedRegion.Right > 1.000001 || normalizedRegion.Bottom > 1.000001)
+                throw new ArgumentOutOfRangeException(nameof(normalizedRegion));
+            if (pixelWidth < 1 || pixelHeight < 1 || pixelWidth > 4096 || pixelHeight > 4096)
+                throw new ArgumentOutOfRangeException(nameof(pixelWidth));
+            return RenderCoreAsync(pageIndex, pixelWidth, pixelHeight, normalizedRegion, cancellationToken);
+        }
+
+        private async Task<BitmapSource> RenderCoreAsync(int pageIndex, int pixelWidth, int pixelHeight, Rect? normalizedRegion,
+            CancellationToken cancellationToken)
         {
             ThrowIfDisposed();
             if (pageIndex < 0 || pageIndex >= PageCount)
@@ -110,6 +127,15 @@ namespace PdfReader
                     {
                         DestinationWidth = (uint)Math.Min(pixelWidth, ZoomModel.QualityMaxPixelDimension)
                     };
+                    if (normalizedRegion is Rect region)
+                    {
+                        // SourceRect is relative to the displayed page (PdfPage.Size),
+                        // including PDF crop and rotation; raw TrimBox coordinates differ.
+                        var box = new Windows.Foundation.Rect(0, 0, page.Size.Width, page.Size.Height);
+                        options.SourceRect = new Windows.Foundation.Rect(box.X + region.X * box.Width,
+                            box.Y + region.Y * box.Height, region.Width * box.Width, region.Height * box.Height);
+                        options.DestinationHeight = (uint)Math.Max(1, pixelHeight);
+                    }
                     await page.RenderToStreamAsync(ras, options).AsTask(cancellationToken);
                     cancellationToken.ThrowIfCancellationRequested();
                     ras.Seek(0);
