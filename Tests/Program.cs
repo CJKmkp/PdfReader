@@ -39,7 +39,7 @@ internal static class Program
         string root = Path.Combine(Path.GetTempPath(), "PdfReaderContinuous_" + Guid.NewGuid().ToString("N")); Directory.CreateDirectory(root);
         try
         {
-            WindowStateTests(); RenderBudgetTests(); NativeResolutionTests(root); ConfigTests(root); LayoutTests(); SessionTests(root);
+            WindowStateTests(); WheelStepTests(); RenderBudgetTests(); NativeResolutionTests(root); ConfigTests(root); LayoutTests(); SessionTests(root);
             Console.WriteLine($"PASS: {_checks} continuous PDF checks"); return 0;
         }
         catch (Exception ex) { Console.Error.WriteLine(ex); return 1; }
@@ -82,6 +82,15 @@ internal static class Program
             Check((long)enlarged * Math.Ceiling(enlarged * 800.0 / 600) * 4 <= budget,
                 "Zoom refinement exceeded the pixel budget");
         }
+    }
+
+    private static void WheelStepTests()
+    {
+        Check(EmbeddedReaderSession.ComputeWheelScrollStep(-120, 3, 800, 1) == 144, "Wheel notch did not respect the three-line Windows preference");
+        Check(EmbeddedReaderSession.ComputeWheelScrollStep(-15, 3, 800, 1) == 18, "High-resolution wheel delta was rounded");
+        Check(EmbeddedReaderSession.ComputeWheelScrollStep(120, 3, 800, 2) == -72, "Zoomed wheel speed changed on screen");
+        Check(EmbeddedReaderSession.ComputeWheelScrollStep(-120, -1, 800, 1) == 720, "Page-scroll preference was treated as a negative line count");
+        Check(EmbeddedReaderSession.ComputeWheelScrollStep(120, 0, 800, 1) == 0, "Disabled Windows wheel scrolling was ignored");
     }
 
     private static void NativeResolutionTests(string root)
@@ -163,7 +172,13 @@ internal static class Program
         try
         {
             window.Show(); window.UpdateLayout();
-            Wait(session.OpenAsync(path, 20, CancellationToken.None)); Pump(250);
+            var openingWatch = Stopwatch.StartNew();
+            Wait(session.OpenAsync(path, 20, CancellationToken.None));
+            var firstView = (PdfBackgroundView)composition.Background;
+            Check(firstView.GetStripPageImage(20).Source is BitmapSource && Field<Task>(session, "_stripVisibleTask").IsCompleted,
+                "Opening finished without the requested page's first paint");
+            Console.WriteLine($"PDF open/first visible page: {openingWatch.ElapsedMilliseconds}ms (60-page fixture)");
+            Pump(250);
             var view = (PdfBackgroundView)composition.Background;
             Check(session.DisplayMode == PdfDisplayMode.ContinuousScroll && session.CurrentPage == 20,
                 "Opening a saved late page rendered the beginning of the document instead");
@@ -182,6 +197,9 @@ internal static class Program
             Check(view.GetStripPageImage(20).Source is BitmapSource && view.GetStripPageImage(50).Source == null && view.ResidentPageCount <= 5,
                 "Continuous mode rendered or retained offscreen pages");
             // These tests concern document touch navigation only, not ink storage.
+            Wait(session.ScrollToPageTopAsync(0, CancellationToken.None)); Pump(180);
+            MouseNavigationTests(session, composition, view);
+            Wait(session.ResetZoomAsync());
             Wait(session.ScrollToPageTopAsync(0, CancellationToken.None)); Pump(180);
             composition.InputCanvas.EditingMode = InkCanvasEditingMode.Select; session.IsPenMode = true;
             using (var touch = new TestTouchDevice(view, 1001))
@@ -221,7 +239,8 @@ internal static class Program
             Wait(session.ScrollToPageTopAsync(0, CancellationToken.None)); Pump(180);
             int notifications = 0; session.PageChanged += _ => notifications++;
             session.HandleScroll(-15); Pump(15);
-            Check(Math.Abs(view.ScrollOffset - 7.5) < .01, "High-resolution wheel scrolling jumped a full notch");
+            Check(Math.Abs(view.ScrollOffset - EmbeddedReaderSession.ComputeWheelScrollStep(-15, SystemParameters.WheelScrollLines, view.ActualHeight, 1)) < .01,
+                "High-resolution wheel scrolling jumped a full notch");
             for (int i = 0; i < 8; i++) session.HandleScroll(-15);
             Pump(180);
             Check(notifications == 0, "Scrolling inside one page repeatedly wrote the remembered page/config");
@@ -250,7 +269,11 @@ internal static class Program
             Check(Math.Abs(view.GetViewportTopScrollOffset()) < .1, "Zoomed navigation could not reach page one");
             Wait(session.ScrollByAsync(500));
             for (int i = 0; i < 15; i++) session.HandleScroll(-120);
+            session.IsPenMode = false;
+            Check(session.BeginMouseNavigation(new Point(300, 300), composition.InputCanvas), "Replacement-document drag fixture could not start");
             Wait(session.OpenAsync(other, 0, CancellationToken.None)); Pump(350);
+            Check(!session.UpdateMouseNavigation(new Point(300, 100)), "Replacing the PDF retained an old mouse drag");
+            session.IsPenMode = true;
             Check(session.PageCount == 1 && view.ResidentPageCount <= 1 && view.GetStripPageImage(0).Source != null,
                 "An old render task repainted a replacement document");
             var lastBitmap = (BitmapSource)view.GetStripPageImage(0).Source;
@@ -277,5 +300,38 @@ internal static class Program
             Check(errors.Count == 0, "Continuous reader logged failures: " + string.Join("\n", errors));
         }
         finally { window.Close(); }
+    }
+
+    private static void MouseNavigationTests(EmbeddedReaderSession session, TestComposition composition, PdfBackgroundView view)
+    {
+        var origin = new Point(300, 300);
+        composition.InputCanvas.EditingMode = InkCanvasEditingMode.Ink; session.IsPenMode = true;
+        Check(!session.BeginMouseNavigation(origin, composition.InputCanvas), "Mouse drag stole left-button ink input");
+        composition.InputCanvas.EditingMode = InkCanvasEditingMode.Select;
+        Check(!session.BeginMouseNavigation(origin, new Button()) && !session.BeginMouseNavigation(origin, new ListBox()),
+            "Mouse drag stole toolbar or catalogue interaction");
+        Check(!session.BeginMouseNavigation(new Point(-1, 300), composition.InputCanvas), "Drag started outside the PDF viewport");
+        session.TouchGesturesEnabled = false;
+        Check(session.BeginMouseNavigation(origin, composition.InputCanvas), "Mouse selection drag incorrectly required touch gestures");
+        Check(session.UpdateMouseNavigation(new Point(301, 300)) && Math.Abs(view.GetViewportTopScrollOffset()) < .01,
+            "A click with slight pointer jitter moved the document");
+        Check(session.UpdateMouseNavigation(new Point(300, -1800)) && session.CurrentPage > 1,
+            "Mouse selection drag did not cross pages");
+        Check(!session.BeginTouchNavigation(99, origin), "Touch navigation started during a mouse drag");
+        session.EndMouseNavigation();
+        Check(!session.UpdateMouseNavigation(origin), "Released mouse drag kept moving the document");
+        Wait(session.ScrollToPageTopAsync(0, CancellationToken.None));
+        Check(session.BeginMouseNavigation(origin, composition.InputCanvas), "A completed drag prevented the next drag");
+        composition.InputCanvas.EditingMode = InkCanvasEditingMode.Ink;
+        Check(!session.UpdateMouseNavigation(new Point(300, 200)), "Switching to ink left mouse navigation active");
+        session.IsPenMode = false;
+        Check(session.BeginMouseNavigation(origin, composition.InputCanvas), "Reading-mode mouse drag was unavailable");
+        session.UpdateMouseNavigation(new Point(300, 100000));
+        Check(Math.Abs(view.GetViewportTopScrollOffset()) < .01, "Mouse drag overshot the document start");
+        var up = new MouseButtonEventArgs(Mouse.PrimaryDevice, Environment.TickCount, MouseButton.Left)
+        { RoutedEvent = UIElement.PreviewMouseUpEvent };
+        composition.InputCanvas.RaiseEvent(up);
+        Check(up.Handled && !session.UpdateMouseNavigation(origin), "Routed mouse release did not end navigation");
+        session.TouchGesturesEnabled = true; session.IsPenMode = true;
     }
 }

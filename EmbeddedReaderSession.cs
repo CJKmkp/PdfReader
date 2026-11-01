@@ -140,6 +140,7 @@ namespace PdfReader
             var session = await PdfDocumentSession.OpenAsync(path, cancellationToken).ConfigureAwait(false);
             if (_disposed) { session.Dispose(); throw new ObjectDisposedException(nameof(EmbeddedReaderSession)); }
             CancelStripRendering();
+            EndMouseNavigation();
             ResetNavigationTouches();
 
             PdfDocumentSession previous;
@@ -251,6 +252,7 @@ namespace PdfReader
             _logInfo?.Invoke($"SetDisplayMode 请求={mode} 当前={_displayMode} IsOpen={IsOpen}");
             if (_displayMode == mode) return;
             CancelStripRendering();
+            EndMouseNavigation();
             ResetNavigationTouches();
 
             var view = _backgroundView;
@@ -306,7 +308,8 @@ namespace PdfReader
                     view.SetScrollOffset(Canvas.GetTop(page) + _viewMatrix.OffsetY / Math.Max(.001, CurrentScale));
                 else view.SetScrollOffset(offset);
             });
-            await RenderStripViewportAsync(cancellationToken).ConfigureAwait(false);
+            // Do not delay opening/fullscreen until adjacent pages finish rendering.
+            await RenderStripViewportAsync(cancellationToken, waitForVisibleOnly: true).ConfigureAwait(false);
         }
 
         /// <summary>
@@ -497,6 +500,7 @@ namespace PdfReader
             window.PreviewMouseWheel += Host_PreviewMouseWheel;
             _wheelHost = window;
             AttachTouchNavigation(window);
+            AttachMouseNavigation(window);
         }
 
         private void DetachWheelHandler()
@@ -506,6 +510,7 @@ namespace PdfReader
 
             try { host.PreviewMouseWheel -= Host_PreviewMouseWheel; }
             catch { }
+            DetachMouseNavigation();
             DetachTouchNavigation();
             _wheelHost = null;
         }
@@ -554,7 +559,8 @@ namespace PdfReader
                 // 滚轮语义：向上滚（delta>0）= 视图往开头走（上一页方向），
                 // 向下滚 = 视图往结尾走（下一页方向），与翻页模式和浏览器惯例一致。
                 // 之前把正 delta 当成向前滚动，方向反了。
-                double step = -delta / 120.0 * 60 / Math.Max(.001, CurrentScale);
+                double step = ComputeWheelScrollStep(delta, SystemParameters.WheelScrollLines,
+                    _backgroundView?.ActualHeight ?? 0, CurrentScale);
                 _ = ScrollByAsync(step);
             }
             else
@@ -565,6 +571,13 @@ namespace PdfReader
                 _ = GoToPageAsync(target, CancellationToken.None);
             }
             return true;
+        }
+
+        internal static double ComputeWheelScrollStep(int delta, int lines, double viewportHeight, double scale)
+        {
+            if (!double.IsFinite(scale) || scale <= 0) scale = 1;
+            double distance = lines == -1 ? Math.Max(1, viewportHeight) * .9 : Math.Max(0, lines) * 48.0;
+            return -delta / 120.0 * distance / scale;
         }
 
         #region 双指手势与缩放
@@ -587,7 +600,7 @@ namespace PdfReader
         public bool OnCanvasGestureStarting(ManipulationStartingEventArgs e)
         {
             if (!IsOpen || _backgroundView == null) return false;
-            if (_navigationTouches.Count > 0) { e.Mode = ManipulationModes.None; return true; }
+            if (_navigationTouches.Count > 0 || _mouseDragOrigin != null) { e.Mode = ManipulationModes.None; return true; }
 
             int count = e.Manipulators?.Count() ?? 0;
             if (count == 0) return false;
@@ -1318,6 +1331,7 @@ namespace PdfReader
         public void SuspendForWhiteboard()
         {
             if (!IsOpen) return;
+            EndMouseNavigation();
 
             // 事件在宿主清空画布之前触发，此处同步归位墨迹到页缓存；
             // SetPluginVisiblePagesAsync 在 UI 线程内联执行，事件回调返回前即完成。

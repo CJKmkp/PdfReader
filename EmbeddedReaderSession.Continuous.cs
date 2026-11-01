@@ -16,6 +16,7 @@ namespace PdfReader
         private string _stripRenderKey;
         private PdfDocumentSession _stripRenderDocument;
         private Task _stripRenderTask = Task.CompletedTask;
+        private Task _stripVisibleTask = Task.CompletedTask;
 
         private void CancelStripRendering()
         {
@@ -34,13 +35,13 @@ namespace PdfReader
             catch (Exception ex) { _logError?.Invoke("更新 PDF 可见页失败", ex); }
         }
 
-        private Task RenderStripViewportAsync(CancellationToken cancellationToken)
+        private Task RenderStripViewportAsync(CancellationToken cancellationToken, bool waitForVisibleOnly = false)
         {
             var view = _backgroundView;
             if (view == null || _displayMode != PdfDisplayMode.ContinuousScroll || !IsOpen || _disposed)
                 return Task.CompletedTask;
             if (!view.Dispatcher.CheckAccess())
-                return view.Dispatcher.InvokeAsync(() => RenderStripViewportAsync(cancellationToken)).Task.Unwrap();
+                return view.Dispatcher.InvokeAsync(() => RenderStripViewportAsync(cancellationToken, waitForVisibleOnly)).Task.Unwrap();
 
             if (cancellationToken.IsCancellationRequested) return Task.CompletedTask;
             var document = _document; var cache = _cache;
@@ -72,7 +73,8 @@ namespace PdfReader
                 return requested < ZoomModel.WidthBucket ? Math.Max(1, requested) : requested / ZoomModel.WidthBucket * ZoomModel.WidthBucket;
             }).ToArray();
             string key = string.Join(";", pages.Select((page, index) => page + ":" + widths[index]));
-            if (ReferenceEquals(document, _stripRenderDocument) && key == _stripRenderKey) return _stripRenderTask;
+            if (ReferenceEquals(document, _stripRenderDocument) && key == _stripRenderKey)
+                return waitForVisibleOnly ? _stripVisibleTask : _stripRenderTask;
 
             CancelStripRendering();
             var source = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
@@ -81,17 +83,39 @@ namespace PdfReader
             int version = Interlocked.Increment(ref _stripRenderVersion);
             _stripRenderDocument = document; _stripRenderKey = key;
             view.RetainStripSources(pages.ToHashSet());
-            _stripRenderTask = RenderStripWindowAsync(document, cache, view, pages, widths, version, token);
-            return _stripRenderTask;
+            var visibleReady = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            _stripVisibleTask = visibleReady.Task;
+            _stripRenderTask = RenderStripWindowAsync(document, cache, view, pages, widths, visibleSet.Count, visibleReady, version, token);
+            return waitForVisibleOnly ? _stripVisibleTask : _stripRenderTask;
         }
 
         private async Task RenderStripWindowAsync(PdfDocumentSession document, PageRenderCache cache, PdfBackgroundView view,
-            IReadOnlyList<int> pages, IReadOnlyList<int> widths, int version, CancellationToken token)
+            IReadOnlyList<int> pages, IReadOnlyList<int> widths, int visibleCount,
+            TaskCompletionSource visibleReady, int version, CancellationToken token)
         {
             bool entered = false;
             try
             {
                 await _stripRenderGate.WaitAsync(token).ConfigureAwait(false); entered = true;
+                // First paint only missing visible pages at bounded resolution.
+                // Existing images remain on screen while sharper renders arrive.
+                for (int i = 0; i < visibleCount; i++)
+                {
+                    token.ThrowIfCancellationRequested();
+                    int page = pages[i];
+                    bool hasImage = await view.Dispatcher.InvokeAsync(() => view.GetStripPageImage(page)?.Source != null);
+                    if (hasImage) continue;
+                    int previewWidth = Math.Min(768, widths[i]);
+                    if (!cache.TryGet(page, widths[i] / ZoomModel.WidthBucket, out var bitmap)
+                        && !cache.TryGet(page, previewWidth / ZoomModel.WidthBucket, out bitmap))
+                    {
+                        bitmap = await document.RenderAsync(page, previewWidth, token).ConfigureAwait(false);
+                        token.ThrowIfCancellationRequested();
+                        cache.Put(page, previewWidth / ZoomModel.WidthBucket, bitmap);
+                    }
+                    await PublishStripPageAsync(document, view, page, bitmap, version, token).ConfigureAwait(false);
+                }
+                visibleReady.TrySetResult();
                 for (int i = 0; i < pages.Count; i++)
                 {
                     token.ThrowIfCancellationRequested();
@@ -103,13 +127,7 @@ namespace PdfReader
                         token.ThrowIfCancellationRequested();
                         cache.Put(page, bucket, bitmap);
                     }
-                    await view.Dispatcher.InvokeAsync(() =>
-                    {
-                        if (token.IsCancellationRequested || version != Volatile.Read(ref _stripRenderVersion)
-                            || !ReferenceEquals(document, _document) || !ReferenceEquals(view, _backgroundView)
-                            || _displayMode != PdfDisplayMode.ContinuousScroll) return;
-                        view.SetStripPageSource(page, bitmap);
-                    });
+                    await PublishStripPageAsync(document, view, page, bitmap, version, token).ConfigureAwait(false);
                 }
             }
             catch (OperationCanceledException) { }
@@ -118,8 +136,17 @@ namespace PdfReader
                 if (version == Volatile.Read(ref _stripRenderVersion)) _stripRenderKey = null;
                 if (!token.IsCancellationRequested) _logError?.Invoke("渲染 PDF 可见页失败", ex);
             }
-            finally { if (entered) _stripRenderGate.Release(); }
+            finally { visibleReady.TrySetResult(); if (entered) _stripRenderGate.Release(); }
         }
+
+        private Task PublishStripPageAsync(PdfDocumentSession document, PdfBackgroundView view, int page,
+            BitmapSource bitmap, int version, CancellationToken token) => view.Dispatcher.InvokeAsync(() =>
+        {
+            if (token.IsCancellationRequested || version != Volatile.Read(ref _stripRenderVersion)
+                || !ReferenceEquals(document, _document) || !ReferenceEquals(view, _backgroundView)
+                || _displayMode != PdfDisplayMode.ContinuousScroll) return;
+            view.SetStripPageSource(page, bitmap);
+        }).Task;
 
     }
 }
